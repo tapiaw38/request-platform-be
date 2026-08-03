@@ -21,6 +21,19 @@ Variables opcionales: `DATABASE_URL`, `PORT`, `WEB_ORIGIN`, `TRUST_PROXY=1`
 `schema.sql` va embebido en el binario (`go:embed`) y se aplica en cada
 arranque. Es idempotente, así que hace de migración sin herramienta aparte.
 
+### `DATABASE_URL` en producción
+
+Terminala **siempre** en `?sslmode=require`. Con `sslmode=disable` las
+credenciales y el contenido de las firmas viajan en texto plano por internet, y
+RDS con `rds.force_ssl` rechaza la conexión directamente:
+
+```
+FATAL: no pg_hba.conf entry for host "...", no encryption (SQLSTATE 28000)
+```
+
+`sslmode=disable` es aceptable sólo contra el Postgres local del
+`docker-compose`, que no sale de tu máquina.
+
 ## Administrador
 
 Un solo admin, definido por entorno. **Es el único que puede crear peticiones;

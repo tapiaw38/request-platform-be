@@ -30,6 +30,12 @@ func main() {
 	if dsn == "" {
 		dsn = "postgres://postgres:postgres@localhost:5432/request_platform?sslmode=disable"
 	}
+	// RDS rechaza el texto plano de entrada, pero otros proveedores lo aceptan
+	// callados y ahi las credenciales viajan expuestas sin que nadie se entere.
+	if strings.Contains(dsn, "sslmode=disable") && !strings.Contains(dsn, "localhost") && !strings.Contains(dsn, "127.0.0.1") {
+		log.Print("ATENCION: DATABASE_URL usa sslmode=disable contra un host remoto; usá sslmode=require")
+	}
+
 	var err error
 	db, err = pgxpool.New(context.Background(), dsn)
 	if err != nil {
