@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: request_platform
+    ports: ['5432:5432']
+    # El schema corre solo la primera vez, cuando el volumen esta vacio.
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - rp-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d request_platform']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  rp-data:
