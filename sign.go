@@ -31,7 +31,7 @@ const (
 	maxNameSize = 120
 )
 
-func rateLimited(key string) bool {
+func rateLimited(key string, max int) bool {
 	rlMu.Lock()
 	defer rlMu.Unlock()
 	now := time.Now()
@@ -41,7 +41,7 @@ func rateLimited(key string) bool {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= rlMaxPerIP {
+	if len(kept) >= max {
 		rlHits[key] = kept
 		return true
 	}
@@ -68,7 +68,7 @@ func requestOTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "email invalido")
 		return
 	}
-	if rateLimited(clientIP(r)) {
+	if rateLimited("otp:"+clientIP(r), rlMaxPerIP) {
 		fail(w, http.StatusTooManyRequests, "demasiados pedidos, probá más tarde")
 		return
 	}

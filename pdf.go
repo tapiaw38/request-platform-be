@@ -2,14 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/png"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-pdf/fpdf"
+	"github.com/jackc/pgx/v5"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
 )
 
 // Grilla de firmas: 2 columnas x 5 filas = 10 por hoja.
@@ -156,6 +164,91 @@ func decodeDrawing(d *string) *drawing {
 		return nil
 	}
 	return &drawing{data: raw, w: cfg.Width, h: cfg.Height}
+}
+
+// maxSignersInPDF acota la memoria del armado. 5000 firmas son ~500 hojas:
+// mas que eso pide streaming, no un buffer.
+const maxSignersInPDF = 5000
+
+func allSigners(ctx context.Context, petitionID string) ([]signer, error) {
+	rows, err := db.Query(ctx,
+		`select id, name, comment, drawing, created_at from signatures
+		  where petition_id = $1 order by id asc limit $2`, petitionID, maxSignersInPDF)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []signer{}
+	for rows.Next() {
+		var s signer
+		if err := rows.Scan(&s.ID, &s.Name, &s.Comment, &s.Drawing, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func downloadPetition(w http.ResponseWriter, r *http.Request) {
+	var id, body string
+	var bodyPtr *string
+	var original []byte
+	var p petition
+	err := db.QueryRow(r.Context(),
+		`select p.id, p.slug, p.title, p.body, p.pdf, p.pdf_name, p.content_hash, p.created_at,
+		        (select count(*) from signatures where petition_id = p.id)
+		   from petitions p where p.slug = $1`, r.PathValue("slug")).
+		Scan(&id, &p.Slug, &p.Title, &bodyPtr, &original, &p.PDFName, &p.ContentHash, &p.CreatedAt, &p.Signatures)
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
+	if err != nil {
+		log.Printf("download lookup: %v", err)
+		fail(w, http.StatusInternalServerError, "error al leer la peticion")
+		return
+	}
+	if bodyPtr != nil {
+		body = *bodyPtr
+	}
+
+	signers, err := allSigners(r.Context(), id)
+	if err != nil {
+		log.Printf("download signers: %v", err)
+		fail(w, http.StatusInternalServerError, "error al leer las firmas")
+		return
+	}
+
+	// Peticion de texto: el cuerpo se compone acá. Peticion PDF: el original ya
+	// lo trae, asi que solo se generan las hojas de firmas y se anexan.
+	isPDF := original != nil
+	pages, err := buildSignaturesPDF(p, body, signers, !isPDF)
+	if err != nil {
+		log.Printf("build pdf: %v", err)
+		fail(w, http.StatusInternalServerError, "no se pudo generar el PDF")
+		return
+	}
+
+	out := pages
+	if isPDF {
+		var merged bytes.Buffer
+		err = api.MergeRaw([]io.ReadSeeker{
+			bytes.NewReader(original),
+			bytes.NewReader(pages),
+		}, &merged, false, nil)
+		if err != nil {
+			log.Printf("merge pdf: %v", err)
+			fail(w, http.StatusInternalServerError, "no se pudo anexar las firmas al PDF")
+			return
+		}
+		out = merged.Bytes()
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+downloadName(p)+"\"")
+	w.Write(out)
 }
 
 func downloadName(p petition) string {

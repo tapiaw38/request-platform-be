@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +20,9 @@ import (
 
 const maxPDFBytes = 5 << 20 // 5MB; el bytea de Postgres aguanta esto sin despeinarse
 
+//go:embed schema.sql
+var schemaSQL string
+
 var db *pgxpool.Pool
 
 func main() {
@@ -33,12 +37,28 @@ func main() {
 	}
 	defer db.Close()
 
+	// schema.sql es idempotente (create ... if not exists), asi que correrlo en
+	// cada arranque hace de migracion sin release phase ni herramienta aparte.
+	if _, err := db.Exec(context.Background(), schemaSQL); err != nil {
+		log.Fatalf("aplicar schema: %v", err)
+	}
+
+	if !adminConfigured() {
+		log.Print("aviso: sin ADMIN_EMAIL/ADMIN_PASSWORD nadie puede crear peticiones")
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/petitions", createPetition)
+	mux.HandleFunc("POST /api/admin/login", adminLogin)
+	mux.HandleFunc("POST /api/admin/logout", adminLogout)
+	mux.HandleFunc("GET /api/admin/me", adminMe)
+
+	// Crear es solo del admin; leer y firmar es publico.
+	mux.HandleFunc("POST /api/petitions", requireAdmin(createPetition))
 	mux.HandleFunc("GET /api/petitions", listPetitions)
 	mux.HandleFunc("GET /api/petitions/{slug}", getPetition)
 	mux.HandleFunc("GET /api/petitions/{slug}/signers", listSigners)
 	mux.HandleFunc("GET /api/petitions/{slug}/doc", getPetitionDoc)
+	mux.HandleFunc("GET /api/petitions/{slug}/download", downloadPetition)
 	mux.HandleFunc("POST /api/petitions/{slug}/otp", requestOTP)
 	mux.HandleFunc("POST /api/petitions/{slug}/sign", signPetition)
 
@@ -61,6 +81,9 @@ func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// La cookie de sesion del admin no viaja sin esto. Va de la mano con un
+		// origen unico y explicito: con "*" el navegador lo rechaza.
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
