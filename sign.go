@@ -271,7 +271,7 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 		   (petition_id, name, email, dni, address, locality, phone,
 		    comment, drawing, content_hash, ip, user_agent)
 		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		 on conflict (petition_id, email) do nothing`,
+		 on conflict do nothing`,
 		id, name, email, dni, address, locality, phone,
 		comment, drawing, currentHash, clientIP(r), r.UserAgent())
 	if err != nil {
@@ -283,7 +283,9 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 	db.Exec(r.Context(), `delete from otps where petition_id = $1 and email = $2`, id, email)
 
 	if tag.RowsAffected() == 0 {
-		fail(w, http.StatusConflict, "ese email ya firmó esta petición")
+		// Un solo mensaje para las dos causas: decir cual choco confirmaria que
+		// ese DNI ya firmo, y el padron no es publico.
+		fail(w, http.StatusConflict, "ya hay una firma registrada con ese email o ese DNI en esta petición")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"content_hash": currentHash})

@@ -52,6 +52,12 @@ Si el front vive en otro dominio que la API, hace falta `COOKIE_SECURE=1` y
 `COOKIE_CROSS_SITE=1`: sin eso el navegador no manda la cookie en pedidos
 cross-site y el admin no puede crear nada.
 
+Las rutas de admin exigen además el encabezado **`X-Requested-With`**. No lleva
+ningún secreto: alcanza con que exista. Un form `multipart` cross-site sale sin
+preflight, así que con `SameSite=None` un sitio ajeno podría crear peticiones con
+tu cookie puesta; pedir un encabezado propio obliga al preflight y ahí CORS lo
+frena. El front lo manda solo en los pedidos que modifican.
+
 ## Desplegar en Heroku
 
 ```sh
@@ -151,6 +157,16 @@ confirmación la pide el front; la API no pregunta dos veces.
 ```sh
 go test ./...
 ```
+
+## Una firma por persona
+
+`unique (petition_id, email)` y `unique (petition_id, dni)`. Sin la segunda, la
+misma persona firma dos veces con dos correos y el padrón la cuenta dos veces.
+
+El DNI se guarda normalizado —sólo dígitos—, así que `30.555.123` y `30555123`
+son el mismo documento. El índice único se crea aparte del schema y su fallo no
+es fatal: si una base vieja ya tiene un DNI repetido, arrancar igual es mejor
+que no arrancar, y el log dice cómo encontrarlo.
 
 ## Descarga con firmas
 

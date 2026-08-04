@@ -49,6 +49,17 @@ func main() {
 		log.Fatalf("aplicar schema: %v", err)
 	}
 
+	// El indice unico de DNI va aparte y no es fatal: si la base ya venia con
+	// un DNI repetido de antes de esta regla, crear el indice falla, y quedarse
+	// sin arrancar por eso seria peor que seguir con el dato viejo duplicado.
+	if _, err := db.Exec(context.Background(),
+		`create unique index if not exists signatures_unique_dni
+		   on signatures (petition_id, dni)`); err != nil {
+		log.Printf("ATENCION: no se pudo crear el indice unico de DNI: %v", err)
+		log.Print("hay DNI repetidos. Para encontrarlos: select petition_id, dni, count(*) " +
+			"from signatures where dni is not null group by 1,2 having count(*) > 1;")
+	}
+
 	if !adminConfigured() {
 		log.Print("aviso: sin ADMIN_EMAIL/ADMIN_PASSWORD nadie puede crear peticiones")
 	}
@@ -88,7 +99,7 @@ func cors(next http.Handler) http.Handler {
 	origin := cmp(os.Getenv("WEB_ORIGIN"), "http://localhost:5173")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+csrfHeader)
 		// La cookie de sesion del admin no viaja sin esto. Va de la mano con un
 		// origen unico y explicito: con "*" el navegador lo rechaza.
 		w.Header().Set("Access-Control-Allow-Credentials", "true")

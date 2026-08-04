@@ -88,11 +88,22 @@ func isAdmin(r *http.Request) bool {
 	return err == nil && validSession(c.Value)
 }
 
+// csrfHeader es la defensa contra CSRF. Un form multipart cross-site es un
+// "simple request" para el navegador: sale sin preflight y, con SameSite=None,
+// se lleva la cookie de sesion puesta. Exigir un header propio obliga al
+// preflight, y ahi CORS lo frena porque el Origin no coincide con WEB_ORIGIN.
+// El valor no importa: lo que protege es que el header exista.
+const csrfHeader = "X-Requested-With"
+
 // requireAdmin envuelve los handlers que solo el admin puede ejecutar.
 func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isAdmin(r) {
 			fail(w, http.StatusUnauthorized, "necesitás iniciar sesión como administrador")
+			return
+		}
+		if r.Header.Get(csrfHeader) == "" {
+			fail(w, http.StatusForbidden, "falta el encabezado "+csrfHeader)
 			return
 		}
 		next(w, r)
