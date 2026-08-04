@@ -106,6 +106,9 @@ func cors(next http.Handler) http.Handler {
 		// La cookie de sesion del admin no viaja sin esto. Va de la mano con un
 		// origen unico y explicito: con "*" el navegador lo rechaza.
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		// Sin esto el front no puede leer el nombre del archivo al descargar el
+		// PDF por fetch: CORS oculta todo header que no sea de la lista segura.
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
