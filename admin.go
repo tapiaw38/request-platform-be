@@ -102,7 +102,11 @@ func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			fail(w, http.StatusUnauthorized, "necesitás iniciar sesión como administrador")
 			return
 		}
-		if r.Header.Get(csrfHeader) == "" {
+		// Solo en los que modifican. Un GET no cambia nada, y ademas la descarga
+		// del PDF es una navegacion del navegador (<a download>), que no puede
+		// mandar encabezados propios. Un GET cross-site tampoco filtra nada:
+		// el atacante dispara el pedido pero CORS le impide leer la respuesta.
+		if r.Method != http.MethodGet && r.Header.Get(csrfHeader) == "" {
 			fail(w, http.StatusForbidden, "falta el encabezado "+csrfHeader)
 			return
 		}

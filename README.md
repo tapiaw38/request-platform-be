@@ -52,11 +52,15 @@ Si el front vive en otro dominio que la API, hace falta `COOKIE_SECURE=1` y
 `COOKIE_CROSS_SITE=1`: sin eso el navegador no manda la cookie en pedidos
 cross-site y el admin no puede crear nada.
 
-Las rutas de admin exigen además el encabezado **`X-Requested-With`**. No lleva
-ningún secreto: alcanza con que exista. Un form `multipart` cross-site sale sin
-preflight, así que con `SameSite=None` un sitio ajeno podría crear peticiones con
-tu cookie puesta; pedir un encabezado propio obliga al preflight y ahí CORS lo
-frena. El front lo manda solo en los pedidos que modifican.
+Las rutas de admin que **modifican** algo exigen además el encabezado
+`X-Requested-With`. No lleva ningún secreto: alcanza con que exista. Un form
+`multipart` cross-site sale sin preflight, así que con `SameSite=None` un sitio
+ajeno podría crear peticiones con tu cookie puesta; pedir un encabezado propio
+obliga al preflight y ahí CORS lo frena.
+
+Los `GET` no lo exigen: no cambian nada, y la descarga del PDF es una navegación
+del navegador (`<a download>`), que no puede mandar encabezados propios. Un `GET`
+cross-site tampoco filtra datos, porque CORS impide leer la respuesta.
 
 ## Desplegar en Heroku
 
@@ -181,9 +185,11 @@ ante quien corresponda, no para dejarlos en la web:
 | nombre, localidad, comentario, trazo, fecha | sí | sí |
 | DNI, domicilio, celular | **no** | sí |
 
-Vale para las tres salidas: `/signers`, el detalle de la petición y el PDF de
-`/download`, que arma la grilla con esos datos sólo si la request trae la cookie
-del admin. El filtro es del servidor, no del front.
+El filtro lo aplica el servidor, no el front. En `/signers` y en el detalle de la
+petición, `redactSigners` borra esos campos si la request no trae la cookie del
+admin. El PDF de `/download` directamente **no es público**: la ruta entera está
+detrás de `requireAdmin`, porque un padrón completo con DNI y domicilios no se
+sirve a cualquiera que tenga el link.
 
 ## Editar y eliminar
 
@@ -219,7 +225,7 @@ confirmación la pide el front; la API no pregunta dos veces.
 | GET | `/api/petitions/{slug}` | detalle + primeras 10 firmas + total |
 | GET | `/api/petitions/{slug}/signers?before={id}` | página de 10, cursor por id |
 | GET | `/api/petitions/{slug}/doc` | PDF original |
-| GET | `/api/petitions/{slug}/download` | PDF con las firmas anexadas |
+| GET | `/api/petitions/{slug}/download` | **admin** · PDF con las firmas y sus datos |
 | POST | `/api/petitions/{slug}/otp` | `{email}` → manda código |
 | POST | `/api/petitions/{slug}/sign` | `{email, code, name, dni, address, locality, phone, comment, drawing, content_hash}` |
 

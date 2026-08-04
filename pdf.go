@@ -268,15 +268,13 @@ func downloadPetition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// El PDF con DNI, domicilio y celular es el que se presenta ante quien
-	// corresponda, y lo baja el admin. La descarga publica lleva las mismas
-	// firmas sin esos datos: publicarlos seria filtrar el padron entero.
-	withPersonal := isAdmin(r)
-
 	// Peticion de texto: el cuerpo se compone acá. Peticion PDF: el original ya
 	// lo trae, asi que solo se generan las hojas de firmas y se anexan.
+	// El ultimo true son los datos personales: la ruta esta detras de
+	// requireAdmin, asi que este PDF es el que se presenta ante quien
+	// corresponda y lleva DNI, domicilio y celular.
 	isPDF := original != nil
-	pages, err := buildSignaturesPDF(p, body, signers, !isPDF, withPersonal)
+	pages, err := buildSignaturesPDF(p, body, signers, !isPDF, true)
 	if err != nil {
 		log.Printf("build pdf: %v", err)
 		fail(w, http.StatusInternalServerError, "no se pudo generar el PDF")

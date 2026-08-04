@@ -78,7 +78,9 @@ func main() {
 	mux.HandleFunc("GET /api/petitions/{slug}", getPetition)
 	mux.HandleFunc("GET /api/petitions/{slug}/signers", listSigners)
 	mux.HandleFunc("GET /api/petitions/{slug}/doc", getPetitionDoc)
-	mux.HandleFunc("GET /api/petitions/{slug}/download", downloadPetition)
+	// La descarga es solo del admin: lleva DNI, domicilio y celular de cada
+	// firmante, o sea el padron completo con datos personales.
+	mux.HandleFunc("GET /api/petitions/{slug}/download", requireAdmin(downloadPetition))
 	mux.HandleFunc("POST /api/petitions/{slug}/otp", requestOTP)
 	mux.HandleFunc("POST /api/petitions/{slug}/sign", signPetition)
 
