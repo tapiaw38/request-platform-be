@@ -61,10 +61,19 @@ func makeSigners(t *testing.T, n int, withDrawing bool) []signer {
 	t.Helper()
 	out := make([]signer, n)
 	for i := range out {
+		dni := fmt.Sprintf("%08d", 20000000+i)
+		address := fmt.Sprintf("Av. Siempreviva %d", 100+i)
+		locality := "San Carlos de Bariloche"
+		phone := fmt.Sprintf("+549294%06d", i)
 		out[i] = signer{
-			ID:        int64(i + 1),
-			Name:      fmt.Sprintf("Firmante Número %d", i+1),
-			CreatedAt: time.Now(),
+			ID:          int64(i + 1),
+			Name:        fmt.Sprintf("Firmante Número %d", i+1),
+			DNI:         &dni,
+			Address:     &address,
+			Locality:    &locality,
+			Phone:       &phone,
+			ContentHash: strings.Repeat("a", 64),
+			CreatedAt:   time.Now(),
 		}
 		if withDrawing {
 			d := pngDataURL(t, 600, 240)
@@ -84,7 +93,7 @@ func TestBuildSignaturesPDFPaginaLlena(t *testing.T) {
 	p := samplePetition()
 	// 10 firmas entran justo en una hoja; la 11 obliga a abrir la segunda.
 	for _, tc := range []struct{ signers, wantMin int }{{10, 1}, {11, 2}, {21, 3}} {
-		out, err := buildSignaturesPDF(p, "", makeSigners(t, tc.signers, true), false)
+		out, err := buildSignaturesPDF(p, "", makeSigners(t, tc.signers, true), false, true)
 		if err != nil {
 			t.Fatalf("%d firmas: %v", tc.signers, err)
 		}
@@ -101,7 +110,7 @@ func TestBuildSignaturesPDFSinTrazoNiFirmas(t *testing.T) {
 	p := samplePetition()
 
 	// Firmas sin dibujo: se emite igual, con la leyenda en lugar del trazo.
-	out, err := buildSignaturesPDF(p, "", makeSigners(t, 3, false), false)
+	out, err := buildSignaturesPDF(p, "", makeSigners(t, 3, false), false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +119,7 @@ func TestBuildSignaturesPDFSinTrazoNiFirmas(t *testing.T) {
 	}
 
 	// Peticion sin ninguna firma: tiene que dar un PDF valido, no un error.
-	out, err = buildSignaturesPDF(p, "", nil, false)
+	out, err = buildSignaturesPDF(p, "", nil, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +131,7 @@ func TestBuildSignaturesPDFSinTrazoNiFirmas(t *testing.T) {
 func TestBuildSignaturesPDFConCuerpoLargo(t *testing.T) {
 	p := samplePetition()
 	body := strings.Repeat("Pedimos una senda peatonal con acentos: ñ á é í ó ú ü. ", 200)
-	out, err := buildSignaturesPDF(p, body, makeSigners(t, 2, true), true)
+	out, err := buildSignaturesPDF(p, body, makeSigners(t, 2, true), true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +160,51 @@ func TestDownloadName(t *testing.T) {
 	}
 	if strings.Contains(got, "a1b2c3") {
 		t.Errorf("el sufijo aleatorio del slug no deberia aparecer: %s", got)
+	}
+}
+
+func TestSignerLinesDatosPersonales(t *testing.T) {
+	s := makeSigners(t, 1, false)[0]
+
+	// Descarga del admin: DNI con puntos, celular, domicilio y localidad.
+	got := strings.Join(signerLines(s, true), "\n")
+	for _, want := range []string{"DNI 20.000.000", "Cel. +5492940000", "Av. Siempreviva 100", "San Carlos de Bariloche", "Firmado el "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("falta %q en:\n%s", want, got)
+		}
+	}
+
+	// Descarga publica: sobrevive la localidad, nada mas.
+	pub := strings.Join(signerLines(s, false), "\n")
+	for _, leaked := range []string{"DNI", "20.000.000", "Cel.", "Av. Siempreviva"} {
+		if strings.Contains(pub, leaked) {
+			t.Errorf("%q no puede salir en la descarga publica:\n%s", leaked, pub)
+		}
+	}
+	if !strings.Contains(pub, "San Carlos de Bariloche") || !strings.Contains(pub, "Firmado el ") {
+		t.Errorf("la localidad y la fecha si son publicas:\n%s", pub)
+	}
+}
+
+// Una firma vieja sin estos datos no puede romper el armado ni dejar lineas
+// colgadas con un separador y nada al lado.
+func TestSignerLinesFirmaVieja(t *testing.T) {
+	old := signer{ID: 1, Name: "Firmante Sin Datos", CreatedAt: time.Now()}
+	lines := signerLines(old, true)
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "Firmado el ") {
+		t.Fatalf("sin datos solo deberia quedar la fecha: %q", lines)
+	}
+}
+
+func TestBuildSignaturesPDFConDatosPersonales(t *testing.T) {
+	p := samplePetition()
+	// 10 firmas con las lineas extra tienen que seguir entrando en una hoja:
+	// si el alto de celda se pasa, aparece una segunda hoja a medio llenar.
+	out, err := buildSignaturesPDF(p, "", makeSigners(t, 10, true), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countPages(out); got != 1 {
+		t.Errorf("10 firmas con datos personales dieron %d hojas, esperaba 1", got)
 	}
 }

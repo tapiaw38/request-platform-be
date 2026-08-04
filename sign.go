@@ -29,6 +29,8 @@ const (
 	maxDrawing  = 200_000
 	maxComment  = 500
 	maxNameSize = 120
+	maxAddress  = 200
+	maxLocality = 120
 )
 
 func rateLimited(key string, max int) bool {
@@ -158,12 +160,16 @@ func sendOTP(email, code string) {
 
 func signPetition(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Email   string `json:"email"`
-		Code    string `json:"code"`
-		Name    string `json:"name"`
-		Comment string `json:"comment"`
-		Drawing string `json:"drawing"`
-		Hash    string `json:"content_hash"`
+		Email    string `json:"email"`
+		Code     string `json:"code"`
+		Name     string `json:"name"`
+		DNI      string `json:"dni"`
+		Address  string `json:"address"`
+		Locality string `json:"locality"`
+		Phone    string `json:"phone"`
+		Comment  string `json:"comment"`
+		Drawing  string `json:"drawing"`
+		Hash     string `json:"content_hash"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxDrawing+8192)).Decode(&in); err != nil {
 		fail(w, http.StatusBadRequest, "json invalido")
@@ -171,12 +177,30 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 	}
 	email := normalizeEmail(in.Email)
 	name := strings.TrimSpace(in.Name)
+	// DNI y celular se guardan normalizados: el mismo documento escrito con o
+	// sin puntos tiene que ser el mismo dato para quien despues lea el padron.
+	dni := normalizeDNI(in.DNI)
+	phone := normalizePhone(in.Phone)
+	address := strings.TrimSpace(in.Address)
+	locality := strings.TrimSpace(in.Locality)
 	switch {
 	case !validEmail(email):
 		fail(w, http.StatusBadRequest, "email invalido")
 		return
 	case name == "" || len(name) > maxNameSize:
 		fail(w, http.StatusBadRequest, "nombre requerido")
+		return
+	case !validDNI(dni):
+		fail(w, http.StatusBadRequest, "DNI invalido: son 7 u 8 dígitos")
+		return
+	case address == "" || len(address) > maxAddress:
+		fail(w, http.StatusBadRequest, "domicilio requerido (máx. 200 caracteres)")
+		return
+	case locality == "" || len(locality) > maxLocality:
+		fail(w, http.StatusBadRequest, "localidad requerida (máx. 120 caracteres)")
+		return
+	case !validPhone(phone):
+		fail(w, http.StatusBadRequest, "celular invalido: entre 8 y 15 dígitos")
 		return
 	case len(in.Comment) > maxComment:
 		fail(w, http.StatusBadRequest, "comentario demasiado largo")
@@ -243,10 +267,13 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tag, err := db.Exec(r.Context(),
-		`insert into signatures (petition_id, name, email, comment, drawing, content_hash, ip, user_agent)
-		 values ($1,$2,$3,$4,$5,$6,$7,$8)
+		`insert into signatures
+		   (petition_id, name, email, dni, address, locality, phone,
+		    comment, drawing, content_hash, ip, user_agent)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		 on conflict (petition_id, email) do nothing`,
-		id, name, email, comment, drawing, currentHash, clientIP(r), r.UserAgent())
+		id, name, email, dni, address, locality, phone,
+		comment, drawing, currentHash, clientIP(r), r.UserAgent())
 	if err != nil {
 		log.Printf("insert signature: %v", err)
 		fail(w, http.StatusInternalServerError, "no se pudo registrar la firma")

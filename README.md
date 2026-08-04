@@ -36,8 +36,8 @@ FATAL: no pg_hba.conf entry for host "...", no encryption (SQLSTATE 28000)
 
 ## Administrador
 
-Un solo admin, definido por entorno. **Es el único que puede crear peticiones;
-leerlas y firmarlas es público.**
+Un solo admin, definido por entorno. **Es el único que puede crear, editar y
+eliminar peticiones; leerlas y firmarlas es público.**
 
 ```sh
 ADMIN_EMAIL=admin@tudominio.com
@@ -82,10 +82,51 @@ Cambiar de proveedor no toca código, son las mismas cuatro variables `SMTP_*`.
 
 ## Qué evidencia queda por firma
 
-Nombre, email verificado por OTP, comentario, firma dibujada (opcional), IP,
-user-agent, timestamp y el **SHA-256 del documento tal como estaba al firmar**.
-Si el contenido cambia después, cada firma sigue apuntando a la versión que esa
-persona leyó, y firmar con un hash desactualizado devuelve `409`.
+Nombre, **DNI**, **domicilio**, **localidad**, **celular**, email verificado por
+OTP, comentario, firma dibujada (opcional), IP, user-agent, timestamp y el
+**SHA-256 del documento tal como estaba al firmar**. Si el contenido cambia
+después, cada firma sigue apuntando a la versión que esa persona leyó, y firmar
+con un hash desactualizado devuelve `409`.
+
+DNI y celular se guardan normalizados (sólo dígitos, más el `+` inicial del
+celular): el mismo documento escrito con puntos, con espacios o sin nada tiene
+que ser el mismo dato para quien después lea el padrón. El DNI se valida por
+forma —7 u 8 dígitos—, no contra el RENAPER: esto es firma electrónica con
+evidencia, no identidad probada.
+
+### Qué de eso es público
+
+**DNI, domicilio y celular no se publican.** Se piden para presentar la petición
+ante quien corresponda, no para dejarlos en la web:
+
+| | público | admin |
+|---|---|---|
+| nombre, localidad, comentario, trazo, fecha | sí | sí |
+| DNI, domicilio, celular | **no** | sí |
+
+Vale para las tres salidas: `/signers`, el detalle de la petición y el PDF de
+`/download`, que arma la grilla con esos datos sólo si la request trae la cookie
+del admin. El filtro es del servidor, no del front.
+
+## Editar y eliminar
+
+| | |
+|---|---|
+| `PUT /api/petitions/{slug}` | reemplaza título y contenido |
+| `DELETE /api/petitions/{slug}` | borra la petición **y todas sus firmas** |
+
+Editar **no cambia el slug** aunque cambie el título: el link ya está circulando
+y romperlo perjudica a quien todavía no firmó.
+
+Editar tampoco toca las firmas anteriores. Cada una guarda el hash de la versión
+que esa persona leyó, así que sigue atada a ese texto y no al nuevo; en el PDF
+esas firmas salen marcadas como «firmada sobre una versión anterior». Los OTP
+pendientes se queman en la edición: apuntaban a la versión vieja y ahora chocan
+contra el `409`, así que es mejor que la persona pida uno nuevo y lea el
+documento actual.
+
+Eliminar es irreversible y arrastra firmas y OTP por `on delete cascade`. La
+confirmación la pide el front; la API no pregunta dos veces.
 
 ## Endpoints
 
@@ -95,13 +136,15 @@ persona leyó, y firmar con un hash desactualizado devuelve `409`.
 | POST | `/api/admin/logout` | cierra la sesión |
 | GET | `/api/admin/me` | `{admin, configured}` |
 | POST | `/api/petitions` | **admin** · multipart: `title` + (`body` \| `pdf`) |
+| PUT | `/api/petitions/{slug}` | **admin** · mismo multipart; el slug no cambia |
+| DELETE | `/api/petitions/{slug}` | **admin** · borra la petición y sus firmas |
 | GET | `/api/petitions` | últimas 100 con contador de firmas |
 | GET | `/api/petitions/{slug}` | detalle + primeras 10 firmas + total |
 | GET | `/api/petitions/{slug}/signers?before={id}` | página de 10, cursor por id |
 | GET | `/api/petitions/{slug}/doc` | PDF original |
 | GET | `/api/petitions/{slug}/download` | PDF con las firmas anexadas |
 | POST | `/api/petitions/{slug}/otp` | `{email}` → manda código |
-| POST | `/api/petitions/{slug}/sign` | `{email, code, name, comment, drawing, content_hash}` |
+| POST | `/api/petitions/{slug}/sign` | `{email, code, name, dni, address, locality, phone, comment, drawing, content_hash}` |
 
 ## Tests
 
@@ -112,9 +155,14 @@ go test ./...
 ## Descarga con firmas
 
 `GET /api/petitions/{slug}/download` devuelve un PDF con las firmas en grilla de
-2×5 por hoja: trazo, línea, nombre completo y fecha. El trazo se escala
+2×5 por hoja: trazo, línea, nombre completo, datos y fecha. El trazo se escala
 preservando proporción, y quien firmó sin dibujar aparece con una leyenda en vez
 del trazo.
+
+Si la request trae la cookie del admin, cada celda suma DNI, domicilio y
+celular. Sin ella sale la misma grilla con nombre, localidad y fecha: es el
+mismo endpoint, decidiendo por sesión (ver «Qué de eso es público»). Las firmas
+de una versión previa a una edición salen marcadas.
 
 - Petición de **texto**: se compone el cuerpo y se le anexan las hojas de firmas.
 - Petición **PDF**: se conserva el original tal cual y se le anexan las hojas

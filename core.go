@@ -127,3 +127,64 @@ func normalizeEmail(s string) string {
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s.]+\.[^@\s]+$`)
 
 func validEmail(s string) bool { return len(s) <= 254 && emailRe.MatchString(s) }
+
+// normalizeDNI deja solo los digitos: la gente lo escribe con puntos, con
+// espacios o sin nada, y las tres formas son el mismo documento.
+func normalizeDNI(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// validDNI acepta 7 u 8 digitos. Se valida sobre el DNI ya normalizado.
+// No se verifica contra el RENAPER: esto es firma electronica con evidencia,
+// no identidad probada.
+func validDNI(s string) bool {
+	return len(s) >= 7 && len(s) <= 8
+}
+
+// formatDNI vuelve a poner los puntos de miles para mostrarlo: se guarda en
+// crudo y se presenta como lo lee cualquiera, 12.345.678.
+func formatDNI(s string) string {
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	head := len(s) % 3
+	if head == 0 {
+		head = 3
+	}
+	b.WriteString(s[:head])
+	for i := head; i < len(s); i += 3 {
+		b.WriteByte('.')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// normalizePhone conserva el + inicial (prefijo internacional) y los digitos.
+// Todo lo demas (espacios, guiones, parentesis) es decoracion del que escribe.
+func normalizePhone(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for i, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '+' && i == 0:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// validPhone pide entre 8 y 15 digitos: 8 cubre un fijo local sin
+// caracteristica y 15 es el maximo de la E.164.
+func validPhone(s string) bool {
+	digits := len(strings.TrimPrefix(s, "+"))
+	return digits >= 8 && digits <= 15
+}

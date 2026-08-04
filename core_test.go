@@ -102,3 +102,75 @@ func TestValidEmail(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeYValidDNI(t *testing.T) {
+	for in, want := range map[string]string{
+		"12.345.678": "12345678", " 12 345 678 ": "12345678",
+		"1234567": "1234567", "M 12345678": "12345678", "": "",
+	} {
+		if got := normalizeDNI(in); got != want {
+			t.Errorf("normalizeDNI(%q) = %q, esperaba %q", in, got, want)
+		}
+	}
+	for _, ok := range []string{"1234567", "12345678"} {
+		if !validDNI(ok) {
+			t.Errorf("deberia ser valido: %q", ok)
+		}
+	}
+	for _, bad := range []string{"", "123456", "123456789"} {
+		if validDNI(bad) {
+			t.Errorf("deberia ser invalido: %q", bad)
+		}
+	}
+}
+
+func TestFormatDNI(t *testing.T) {
+	for in, want := range map[string]string{
+		"12345678": "12.345.678", "1234567": "1.234.567",
+		"123": "123", "12": "12", "": "",
+	} {
+		if got := formatDNI(in); got != want {
+			t.Errorf("formatDNI(%q) = %q, esperaba %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeYValidPhone(t *testing.T) {
+	for in, want := range map[string]string{
+		"+54 9 294 466-1234": "+5492944661234",
+		"(0294) 15-4661234":  "0294154661234",
+		"294 466 1234":       "2944661234",
+		// El + solo cuenta al principio: en el medio es basura, no prefijo.
+		"294+4661234": "2944661234",
+	} {
+		if got := normalizePhone(in); got != want {
+			t.Errorf("normalizePhone(%q) = %q, esperaba %q", in, got, want)
+		}
+	}
+	for _, ok := range []string{"2944661234", "+5492944661234", "12345678"} {
+		if !validPhone(ok) {
+			t.Errorf("deberia ser valido: %q", ok)
+		}
+	}
+	for _, bad := range []string{"", "1234567", "1234567890123456", "+"} {
+		if validPhone(bad) {
+			t.Errorf("deberia ser invalido: %q", bad)
+		}
+	}
+}
+
+func TestRedactSigners(t *testing.T) {
+	v := func(s string) *string { return &s }
+	in := []signer{{
+		ID: 1, Name: "Ana", DNI: v("20000000"), Address: v("Mitre 100"),
+		Locality: v("Bariloche"), Phone: v("2944661234"), Comment: v("de acuerdo"),
+	}}
+	got := redactSigners(in)[0]
+	if got.DNI != nil || got.Address != nil || got.Phone != nil {
+		t.Errorf("DNI, domicilio y celular no pueden salir al publico: %+v", got)
+	}
+	// Lo que la planilla muestra al lado del nombre sigue estando.
+	if got.Name != "Ana" || deref(got.Locality) != "Bariloche" || deref(got.Comment) != "de acuerdo" {
+		t.Errorf("redactar de mas: %+v", got)
+	}
+}

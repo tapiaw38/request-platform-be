@@ -26,13 +26,17 @@ const (
 	pageMargin       = 15.0
 	colGap           = 10.0
 	cellH            = 47.0
-	drawBoxH         = 26.0 // alto reservado al trazo dentro de la celda
-	gridTop          = pageMargin + 26
+	// El trazo cede alto para que entren DNI, domicilio/localidad y celular
+	// debajo del nombre sin bajar de 10 firmas por hoja.
+	drawBoxH = 20.0
+	gridTop  = pageMargin + 26
 )
 
 // buildSignaturesPDF arma las hojas de firmas. Si withBody, antepone el texto
 // de la peticion; para peticiones PDF se omite porque el original ya lo trae.
-func buildSignaturesPDF(p petition, body string, signers []signer, withBody bool) ([]byte, error) {
+// withPersonal decide si cada celda lleva DNI, domicilio y celular: van solo
+// en la descarga del admin, nunca en la publica.
+func buildSignaturesPDF(p petition, body string, signers []signer, withBody, withPersonal bool) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.SetMargins(pageMargin, pageMargin, pageMargin)
 	pdf.SetAutoPageBreak(false, pageMargin)
@@ -69,7 +73,7 @@ func buildSignaturesPDF(p petition, body string, signers []signer, withBody bool
 		}
 		x := pageMargin + float64(slot%sigCols)*(colW+colGap)
 		y := gridTop + float64(slot/sigCols)*cellH
-		drawSignatureCell(pdf, tr, s, x, y, colW)
+		drawSignatureCell(pdf, tr, s, x, y, colW, p.ContentHash, withPersonal)
 	}
 
 	if total == 0 {
@@ -99,7 +103,7 @@ func signaturesHeader(pdf *fpdf.Fpdf, tr func(string) string, p petition, total 
 	pdf.SetTextColor(0, 0, 0)
 }
 
-func drawSignatureCell(pdf *fpdf.Fpdf, tr func(string) string, s signer, x, y, w float64) {
+func drawSignatureCell(pdf *fpdf.Fpdf, tr func(string) string, s signer, x, y, w float64, currentHash string, withPersonal bool) {
 	// Trazo arriba, datos abajo: el orden de una firma en papel.
 	if img := decodeDrawing(s.Drawing); img != nil {
 		name := fmt.Sprintf("sig%d", s.ID)
@@ -127,9 +131,53 @@ func drawSignatureCell(pdf *fpdf.Fpdf, tr func(string) string, s signer, x, y, w
 
 	pdf.SetFont("Arial", "", 8)
 	pdf.SetTextColor(110, 110, 110)
-	pdf.SetXY(x, lineY+6.5)
-	pdf.CellFormat(w, 4, tr("Firmado el "+s.CreatedAt.Local().Format("02/01/2006 15:04")), "", 0, "L", false, 0, "")
+	dy := lineY + 6.5
+	for _, line := range signerLines(s, withPersonal) {
+		pdf.SetXY(x, dy)
+		pdf.CellFormat(w, 4, tr(clip(line, 44)), "", 0, "L", false, 0, "")
+		dy += 4
+	}
+
+	// Una firma sobre una version anterior sigue siendo valida, pero es sobre
+	// otro texto: decirlo es la unica forma honesta de anexarla al documento.
+	if currentHash != "" && s.ContentHash != "" && s.ContentHash != currentHash {
+		pdf.SetFont("Arial", "I", 7)
+		pdf.SetTextColor(170, 90, 0)
+		pdf.SetXY(x, dy)
+		pdf.CellFormat(w, 3.5, tr("Firmada sobre una versión anterior ("+clip(s.ContentHash, 13)+")"), "", 0, "L", false, 0, "")
+	}
 	pdf.SetTextColor(0, 0, 0)
+}
+
+// signerLines arma las lineas de datos bajo el nombre. Sin withPersonal solo
+// sale la localidad: DNI, domicilio y celular no van en la descarga publica.
+func signerLines(s signer, withPersonal bool) []string {
+	var lines []string
+	if withPersonal {
+		var ids []string
+		if d := deref(s.DNI); d != "" {
+			ids = append(ids, "DNI "+formatDNI(d))
+		}
+		if p := deref(s.Phone); p != "" {
+			ids = append(ids, "Cel. "+p)
+		}
+		if len(ids) > 0 {
+			lines = append(lines, strings.Join(ids, " · "))
+		}
+	}
+
+	var place []string
+	if a := deref(s.Address); withPersonal && a != "" {
+		place = append(place, a)
+	}
+	if l := deref(s.Locality); l != "" {
+		place = append(place, l)
+	}
+	if len(place) > 0 {
+		lines = append(lines, strings.Join(place, ", "))
+	}
+
+	return append(lines, "Firmado el "+s.CreatedAt.Local().Format("02/01/2006 15:04"))
 }
 
 func clip(s string, n int) string {
@@ -172,7 +220,7 @@ const maxSignersInPDF = 5000
 
 func allSigners(ctx context.Context, petitionID string) ([]signer, error) {
 	rows, err := db.Query(ctx,
-		`select id, name, comment, drawing, created_at from signatures
+		`select `+signerCols+` from signatures
 		  where petition_id = $1 order by id asc limit $2`, petitionID, maxSignersInPDF)
 	if err != nil {
 		return nil, err
@@ -181,8 +229,8 @@ func allSigners(ctx context.Context, petitionID string) ([]signer, error) {
 
 	out := []signer{}
 	for rows.Next() {
-		var s signer
-		if err := rows.Scan(&s.ID, &s.Name, &s.Comment, &s.Drawing, &s.CreatedAt); err != nil {
+		s, err := scanSigner(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -220,10 +268,15 @@ func downloadPetition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// El PDF con DNI, domicilio y celular es el que se presenta ante quien
+	// corresponda, y lo baja el admin. La descarga publica lleva las mismas
+	// firmas sin esos datos: publicarlos seria filtrar el padron entero.
+	withPersonal := isAdmin(r)
+
 	// Peticion de texto: el cuerpo se compone acá. Peticion PDF: el original ya
 	// lo trae, asi que solo se generan las hojas de firmas y se anexan.
 	isPDF := original != nil
-	pages, err := buildSignaturesPDF(p, body, signers, !isPDF)
+	pages, err := buildSignaturesPDF(p, body, signers, !isPDF, withPersonal)
 	if err != nil {
 		log.Printf("build pdf: %v", err)
 		fail(w, http.StatusInternalServerError, "no se pudo generar el PDF")

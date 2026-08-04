@@ -28,6 +28,10 @@ create table if not exists signatures (
   petition_id  uuid not null references petitions(id) on delete cascade,
   name         text not null,
   email        text not null,
+  dni          text,        -- ver alter de abajo: nullable por las firmas viejas
+  address      text,
+  locality     text,
+  phone        text,
   comment      text,
   drawing      text,        -- data:image/png;base64,... opcional
   content_hash text not null, -- hash del documento tal como estaba al firmar
@@ -38,3 +42,14 @@ create table if not exists signatures (
 );
 -- Indice para la paginacion por cursor (id desc), no por created_at.
 create index if not exists signatures_by_petition on signatures (petition_id, id desc);
+
+-- Migracion de bases que ya existian antes de pedir estos datos. Quedan
+-- nullable a proposito: las firmas viejas no los tienen y no se pueden
+-- inventar. La obligatoriedad la aplica el handler, no la tabla.
+alter table signatures add column if not exists dni      text;
+alter table signatures add column if not exists address  text;
+alter table signatures add column if not exists locality text;
+alter table signatures add column if not exists phone    text;
+
+-- Una peticion editada cambia de content_hash; updated_at deja ver cuando.
+alter table petitions add column if not exists updated_at timestamptz not null default now();

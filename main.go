@@ -58,8 +58,10 @@ func main() {
 	mux.HandleFunc("POST /api/admin/logout", adminLogout)
 	mux.HandleFunc("GET /api/admin/me", adminMe)
 
-	// Crear es solo del admin; leer y firmar es publico.
+	// Crear, editar y borrar es solo del admin; leer y firmar es publico.
 	mux.HandleFunc("POST /api/petitions", requireAdmin(createPetition))
+	mux.HandleFunc("PUT /api/petitions/{slug}", requireAdmin(updatePetition))
+	mux.HandleFunc("DELETE /api/petitions/{slug}", requireAdmin(deletePetition))
 	mux.HandleFunc("GET /api/petitions", listPetitions)
 	mux.HandleFunc("GET /api/petitions/{slug}", getPetition)
 	mux.HandleFunc("GET /api/petitions/{slug}/signers", listSigners)
@@ -131,19 +133,34 @@ type petition struct {
 	PDFName     *string   `json:"pdf_name"`
 	ContentHash string    `json:"content_hash"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 	Signatures  int       `json:"signatures"`
 }
 
-func createPetition(w http.ResponseWriter, r *http.Request) {
+// petitionForm es el contenido ya validado de un multipart de alta o edicion.
+// body y pdf son mutuamente excluyentes: lo garantiza parsePetitionForm y lo
+// vuelve a exigir el check de la tabla.
+type petitionForm struct {
+	title   string
+	body    *string
+	pdf     []byte
+	pdfName *string
+	hash    string
+}
+
+// parsePetitionForm lee y valida el multipart que comparten alta y edicion.
+// Si algo falla ya escribio la respuesta de error: el handler solo corta.
+func parsePetitionForm(w http.ResponseWriter, r *http.Request) (petitionForm, bool) {
+	var out petitionForm
 	if err := r.ParseMultipartForm(maxPDFBytes); err != nil {
 		fail(w, http.StatusBadRequest, "formulario invalido")
-		return
+		return out, false
 	}
 	title := strings.TrimSpace(r.FormValue("title"))
 	body := strings.TrimSpace(r.FormValue("body"))
 	if title == "" || len(title) > 200 {
 		fail(w, http.StatusBadRequest, "titulo requerido (max 200 caracteres)")
-		return
+		return out, false
 	}
 
 	var pdf []byte
@@ -152,23 +169,23 @@ func createPetition(w http.ResponseWriter, r *http.Request) {
 		defer f.Close()
 		if fh.Size > maxPDFBytes {
 			fail(w, http.StatusRequestEntityTooLarge, "el PDF supera 5MB")
-			return
+			return out, false
 		}
 		pdf, err = io.ReadAll(io.LimitReader(f, maxPDFBytes))
 		if err != nil {
 			fail(w, http.StatusBadRequest, "no se pudo leer el PDF")
-			return
+			return out, false
 		}
 		if !strings.HasPrefix(string(pdf), "%PDF-") {
 			fail(w, http.StatusBadRequest, "el archivo no es un PDF")
-			return
+			return out, false
 		}
 		pdfName = fh.Filename
 	}
 
 	if (body == "") == (pdf == nil) {
 		fail(w, http.StatusBadRequest, "enviá un cuerpo de texto o un PDF, no ambos")
-		return
+		return out, false
 	}
 
 	isPDF := pdf != nil
@@ -176,31 +193,91 @@ func createPetition(w http.ResponseWriter, r *http.Request) {
 	if !isPDF {
 		content = []byte(body)
 	}
-	hash := contentHash(title, content, isPDF)
-
-	var bodyArg, nameArg *string
+	out = petitionForm{title: title, pdf: pdf, hash: contentHash(title, content, isPDF)}
 	if isPDF {
-		nameArg = &pdfName
+		out.pdfName = &pdfName
 	} else {
-		bodyArg = &body
+		out.body = &body
+	}
+	return out, true
+}
+
+func createPetition(w http.ResponseWriter, r *http.Request) {
+	in, ok := parsePetitionForm(w, r)
+	if !ok {
+		return
 	}
 
-	slug := slugify(title)
+	slug := slugify(in.title)
 	_, err := db.Exec(r.Context(),
 		`insert into petitions (slug, title, body, pdf, pdf_name, content_hash)
 		 values ($1,$2,$3,$4,$5,$6)`,
-		slug, title, bodyArg, pdf, nameArg, hash)
+		slug, in.title, in.body, in.pdf, in.pdfName, in.hash)
 	if err != nil {
 		log.Printf("insert petition: %v", err)
 		fail(w, http.StatusInternalServerError, "no se pudo crear la peticion")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"slug": slug, "content_hash": hash})
+	writeJSON(w, http.StatusCreated, map[string]string{"slug": slug, "content_hash": in.hash})
+}
+
+// updatePetition reemplaza titulo y contenido. El slug NO cambia aunque cambie
+// el titulo: el link ya esta circulando y romperlo perjudica a quien todavia no
+// firmo. Las firmas anteriores tampoco se tocan: cada una guarda el hash de la
+// version que esa persona leyo, asi que quedan atadas a ese texto y no al nuevo.
+func updatePetition(w http.ResponseWriter, r *http.Request) {
+	in, ok := parsePetitionForm(w, r)
+	if !ok {
+		return
+	}
+
+	slug := r.PathValue("slug")
+	// Los campos del tipo que no se manda se ponen en null explicitamente:
+	// pasar de texto a PDF (o al reves) tiene que dejar un solo contenido vivo,
+	// que es justo lo que exige el check de la tabla.
+	tag, err := db.Exec(r.Context(),
+		`update petitions
+		    set title = $2, body = $3, pdf = $4, pdf_name = $5,
+		        content_hash = $6, updated_at = now()
+		  where slug = $1`,
+		slug, in.title, in.body, in.pdf, in.pdfName, in.hash)
+	if err != nil {
+		log.Printf("update petition: %v", err)
+		fail(w, http.StatusInternalServerError, "no se pudo editar la peticion")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
+	// Los OTP pendientes apuntan a la version vieja: si alguien los usa ahora
+	// choca con el 409 del hash. Se queman para que pida uno nuevo y lea el
+	// documento actual antes de firmarlo.
+	db.Exec(r.Context(),
+		`delete from otps where petition_id = (select id from petitions where slug = $1)`, slug)
+
+	writeJSON(w, http.StatusOK, map[string]string{"slug": slug, "content_hash": in.hash})
+}
+
+// deletePetition borra la peticion y, por cascade, sus firmas y sus OTP.
+// Es irreversible: la confirmacion la pide el front.
+func deletePetition(w http.ResponseWriter, r *http.Request) {
+	tag, err := db.Exec(r.Context(), `delete from petitions where slug = $1`, r.PathValue("slug"))
+	if err != nil {
+		log.Printf("delete petition: %v", err)
+		fail(w, http.StatusInternalServerError, "no se pudo eliminar la peticion")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func listPetitions(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(r.Context(),
-		`select p.slug, p.title, p.body, p.pdf_name, p.content_hash, p.created_at,
+		`select p.slug, p.title, p.body, p.pdf_name, p.content_hash, p.created_at, p.updated_at,
 		        count(s.id)
 		   from petitions p
 		   left join signatures s on s.petition_id = p.id
@@ -217,7 +294,8 @@ func listPetitions(w http.ResponseWriter, r *http.Request) {
 	out := []petition{}
 	for rows.Next() {
 		var p petition
-		if err := rows.Scan(&p.Slug, &p.Title, &p.Body, &p.PDFName, &p.ContentHash, &p.CreatedAt, &p.Signatures); err != nil {
+		if err := rows.Scan(&p.Slug, &p.Title, &p.Body, &p.PDFName, &p.ContentHash,
+			&p.CreatedAt, &p.UpdatedAt, &p.Signatures); err != nil {
 			log.Printf("scan petition: %v", err)
 			fail(w, http.StatusInternalServerError, "error al listar")
 			return
@@ -228,21 +306,52 @@ func listPetitions(w http.ResponseWriter, r *http.Request) {
 }
 
 type signer struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Comment   *string   `json:"comment"`
-	Drawing   *string   `json:"drawing"`
-	CreatedAt time.Time `json:"created_at"`
+	ID       int64   `json:"id"`
+	Name     string  `json:"name"`
+	Locality *string `json:"locality"`
+	// Datos personales: viajan solo hacia el admin, redactSigners los borra
+	// antes de responderle a cualquier otro. omitempty para que el front
+	// distinga "no me corresponde verlo" de "la firma vieja no lo tiene".
+	DNI     *string `json:"dni,omitempty"`
+	Address *string `json:"address,omitempty"`
+	Phone   *string `json:"phone,omitempty"`
+
+	Comment *string `json:"comment"`
+	Drawing *string `json:"drawing"`
+	// Hash del documento al momento de firmar. Si no coincide con el de la
+	// peticion, esta firma es sobre una version anterior a una edicion.
+	ContentHash string    `json:"content_hash"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 const signersPage = 10
+
+const signerCols = `id, name, dni, address, locality, phone, comment, drawing, content_hash, created_at`
+
+func scanSigner(rows interface{ Scan(...any) error }) (signer, error) {
+	var s signer
+	err := rows.Scan(&s.ID, &s.Name, &s.DNI, &s.Address, &s.Locality, &s.Phone,
+		&s.Comment, &s.Drawing, &s.ContentHash, &s.CreatedAt)
+	return s, err
+}
+
+// redactSigners borra los datos que no son publicos. La localidad se conserva:
+// es lo que una planilla de firmas muestra al lado del nombre. DNI, domicilio y
+// celular no: son datos personales que se piden para presentar la peticion ante
+// quien corresponda, no para publicarlos en la web.
+func redactSigners(signers []signer) []signer {
+	for i := range signers {
+		signers[i].DNI, signers[i].Address, signers[i].Phone = nil, nil, nil
+	}
+	return signers
+}
 
 // fetchSigners pagina por id descendente y no por offset: con offset, una firma
 // nueva corre la ventana y el usuario ve repetida la ultima de la pagina previa.
 // before == 0 trae la primera pagina.
 func fetchSigners(ctx context.Context, petitionID string, before int64) ([]signer, error) {
 	rows, err := db.Query(ctx,
-		`select id, name, comment, drawing, created_at from signatures
+		`select `+signerCols+` from signatures
 		  where petition_id = $1 and ($2 = 0 or id < $2)
 		  order by id desc limit $3`, petitionID, before, signersPage)
 	if err != nil {
@@ -252,8 +361,8 @@ func fetchSigners(ctx context.Context, petitionID string, before int64) ([]signe
 
 	out := []signer{}
 	for rows.Next() {
-		var s signer
-		if err := rows.Scan(&s.ID, &s.Name, &s.Comment, &s.Drawing, &s.CreatedAt); err != nil {
+		s, err := scanSigner(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -288,6 +397,9 @@ func listSigners(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "error al leer firmas")
 		return
 	}
+	if !isAdmin(r) {
+		signers = redactSigners(signers)
+	}
 	writeJSON(w, http.StatusOK, signers)
 }
 
@@ -296,10 +408,11 @@ func getPetition(w http.ResponseWriter, r *http.Request) {
 	var id string
 	var p petition
 	err := db.QueryRow(r.Context(),
-		`select p.id, p.slug, p.title, p.body, p.pdf_name, p.content_hash, p.created_at,
+		`select p.id, p.slug, p.title, p.body, p.pdf_name, p.content_hash, p.created_at, p.updated_at,
 		        (select count(*) from signatures where petition_id = p.id)
 		   from petitions p where p.slug = $1`, slug).
-		Scan(&id, &p.Slug, &p.Title, &p.Body, &p.PDFName, &p.ContentHash, &p.CreatedAt, &p.Signatures)
+		Scan(&id, &p.Slug, &p.Title, &p.Body, &p.PDFName, &p.ContentHash,
+			&p.CreatedAt, &p.UpdatedAt, &p.Signatures)
 	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, http.StatusNotFound, "peticion inexistente")
 		return
@@ -316,6 +429,9 @@ func getPetition(w http.ResponseWriter, r *http.Request) {
 		log.Printf("list signers: %v", err)
 		fail(w, http.StatusInternalServerError, "error al leer firmas")
 		return
+	}
+	if !isAdmin(r) {
+		signers = redactSigners(signers)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"petition": p, "signers": signers})
 }
