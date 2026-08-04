@@ -131,6 +131,8 @@ func mailFrom() (addr, name string) {
 func logMailConfig() {
 	from, name := mailFrom()
 	switch {
+	case os.Getenv("BREVO_API_KEY") != "":
+		log.Printf("mail: Brevo (HTTPS), from %s <%s>", name, from)
 	case os.Getenv("RESEND_API_KEY") != "":
 		log.Printf("mail: Resend (HTTPS), from %s <%s>", name, from)
 	case os.Getenv("SMTP_HOST") != "":
@@ -153,31 +155,35 @@ func otpBody(code string) string {
 // de salida: ahi el unico camino que queda abierto es HTTPS.
 func sendOTP(email, code string) {
 	switch {
+	case os.Getenv("BREVO_API_KEY") != "":
+		go sendViaBrevo(email, code)
 	case os.Getenv("RESEND_API_KEY") != "":
 		go sendViaResend(email, code)
 	case os.Getenv("SMTP_HOST") != "":
 		go sendViaSMTP(email, code)
 	default:
-		log.Printf("[dev] sin RESEND_API_KEY ni SMTP_HOST, OTP para %s: %s", email, code)
+		log.Printf("[dev] sin proveedor de mail configurado, OTP para %s: %s", email, code)
 	}
 }
 
-// sendViaResend usa la API HTTP, que viaja por 443 y no toca ningun puerto SMTP.
-func sendViaResend(email, code string) {
-	from, name := mailFrom()
-	payload, _ := json.Marshal(map[string]any{
-		"from":    fmt.Sprintf("%s <%s>", name, from),
-		"to":      []string{email},
-		"subject": otpSubject(code),
-		"text":    otpBody(code),
-	})
-	req, err := http.NewRequest(http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(payload))
+// postJSON hace el pedido y devuelve el cuerpo si el proveedor lo rechaza.
+// Las dos APIs se comportan igual: 2xx es exito, y el cuerpo del error dice
+// por que (clave invalida, remitente sin verificar, cuota agotada).
+func postJSON(url string, headers map[string]string, payload any, email, proveedor string) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("envio de OTP a %s fallido al armar el cuerpo: %v", email, err)
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("envio de OTP a %s fallido al armar el pedido: %v", email, err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+os.Getenv("RESEND_API_KEY"))
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	res, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
@@ -186,12 +192,41 @@ func sendViaResend(email, code string) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
-		// El cuerpo dice por que: dominio sin verificar, clave invalida, etc.
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		log.Printf("envio de OTP a %s rechazado por Resend (%d): %s", email, res.StatusCode, body)
+		raw, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		log.Printf("envio de OTP a %s rechazado por %s (%d): %s", email, proveedor, res.StatusCode, raw)
 		return
 	}
-	log.Printf("OTP enviado a %s via Resend", email)
+	log.Printf("OTP enviado a %s via %s", email, proveedor)
+}
+
+// sendViaBrevo es la unica via gratuita que no exige dominio propio: alcanza
+// con verificar la casilla remitente con el codigo de 6 digitos que Brevo
+// manda. Va por 443, asi que tampoco la toca el bloqueo de puertos SMTP.
+func sendViaBrevo(email, code string) {
+	from, name := mailFrom()
+	postJSON("https://api.brevo.com/v3/smtp/email",
+		map[string]string{"api-key": os.Getenv("BREVO_API_KEY"), "accept": "application/json"},
+		map[string]any{
+			"sender":      map[string]string{"name": name, "email": from},
+			"to":          []map[string]string{{"email": email}},
+			"subject":     otpSubject(code),
+			"textContent": otpBody(code),
+		}, email, "Brevo")
+}
+
+// sendViaResend necesita un dominio propio verificado: sin eso solo entrega a
+// la casilla con la que se creo la cuenta. Mejor entregabilidad que Brevo sin
+// dominio, porque el SPF y el DKIM quedan alineados.
+func sendViaResend(email, code string) {
+	from, name := mailFrom()
+	postJSON("https://api.resend.com/emails",
+		map[string]string{"Authorization": "Bearer " + os.Getenv("RESEND_API_KEY")},
+		map[string]any{
+			"from":    fmt.Sprintf("%s <%s>", name, from),
+			"to":      []string{email},
+			"subject": otpSubject(code),
+			"text":    otpBody(code),
+		}, email, "Resend")
 }
 
 func sendViaSMTP(email, code string) {

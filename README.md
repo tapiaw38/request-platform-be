@@ -80,22 +80,47 @@ cp .env.example .env
 set -a && . ./.env && set +a && go run .
 ```
 
-Hay dos vías y la API elige sola: si está `RESEND_API_KEY` usa la API HTTP; si
-no, SMTP; si no hay ninguna, imprime el código por consola. El arranque loguea
-cuál quedó activa (`mail: ...`), así que «no llega el código» se diagnostica
-mirando el log en vez de adivinando.
-
-### Por API HTTP — recomendada en producción
-
-```sh
-RESEND_API_KEY=re_xxxxxxxx
-MAIL_FROM=avisos@tudominio.com    # onboarding@resend.dev sirve para probar ya
-MAIL_FROM_NAME=Peticiones
-```
+Hay tres vías y la API elige sola, en este orden: `BREVO_API_KEY`,
+`RESEND_API_KEY`, SMTP. Si no hay ninguna, el código sale por consola. El
+arranque loguea cuál quedó activa (`mail: ...`), así que «no llega el código» se
+diagnostica mirando el log en vez de adivinando.
 
 **Muchos hostings bloquean los puertos SMTP de salida.** Render los cierra todos
 —25, 465 y 587— en sus servicios gratuitos, y ahí el envío muere en timeout sin
-más señal que la del log. La API HTTP sale por 443 y no la afecta.
+más señal que la del log. Las dos APIs HTTP salen por 443 y no las afecta.
+
+| | Dominio propio | Gratis | Entregabilidad |
+|---|---|---|---|
+| Brevo | no hace falta | 300/día | regular sin dominio |
+| Resend | **obligatorio** | 3.000/mes | buena |
+| SMTP | no hace falta | — | según el proveedor |
+
+### Por Brevo — sin dominio propio
+
+```sh
+BREVO_API_KEY=xkeysib-xxxxxxxx
+MAIL_FROM=tucuenta@gmail.com
+MAIL_FROM_NAME=Peticiones
+```
+
+Es la única vía gratuita que funciona sin dominio: se verifica la casilla
+remitente con un código de 6 dígitos que Brevo manda a esa dirección.
+
+Sin dominio propio no hay SPF ni DKIM alineados, así que **buena parte de los
+mails va a caer en spam**. Sirve para arrancar; para que lleguen bien hace falta
+un dominio, y con uno conviene Resend.
+
+### Por Resend — con dominio propio
+
+```sh
+RESEND_API_KEY=re_xxxxxxxx
+MAIL_FROM=avisos@tudominio.com
+```
+
+Se agrega el dominio en resend.com/domains y se cargan los tres registros DNS
+que da. Sin dominio verificado, Resend sólo entrega a la casilla con la que se
+creó la cuenta: `onboarding@resend.dev` es una caja de pruebas, no sirve para
+mandarle a los firmantes.
 
 ### Por SMTP
 
