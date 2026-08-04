@@ -46,11 +46,21 @@ ADMIN_PASSWORD=algo-largo-y-aleatorio
 
 Sin esas dos variables nadie puede crear nada, y el arranque lo avisa por log.
 La contraseña se compara en tiempo constante y el login tiene rate limit por IP.
-La sesión es una cookie `HttpOnly` de 12 horas.
+La sesión es una cookie `HttpOnly` de 12 horas, y vive en la tabla
+`admin_sessions` —guardada como hash, no como token—, así que **sobrevive a los
+reinicios**. Con las sesiones en memoria, cada deploy deslogueaba al admin, y en
+un hosting que duerme el servicio por inactividad eso pasaba casi en cada visita.
 
 Si el front vive en otro dominio que la API, hace falta `COOKIE_SECURE=1` y
 `COOKIE_CROSS_SITE=1`: sin eso el navegador no manda la cookie en pedidos
-cross-site y el admin no puede crear nada.
+cross-site y el admin no puede crear nada. En ese modo la cookie sale además con
+`Partitioned` (CHIPS), porque Firefox y Chrome están dejando de aceptar cookies
+de terceros sin ese atributo.
+
+**Conviene evitar el modo cross-site.** Si el front y la API cuelgan del mismo
+dominio registrable —`practiq.com.ar` y `api.practiq.com.ar`, por ejemplo—, la
+cookie deja de ser de terceros: alcanza `SameSite=Lax`, no hace falta CHIPS y no
+la afecta ningún bloqueo de cookies de terceros.
 
 Las rutas de admin que **modifican** algo exigen además el encabezado
 `X-Requested-With`. No lleva ningún secreto: alcanza con que exista. Un form

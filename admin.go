@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -19,44 +20,36 @@ const (
 	loginMaxTries = 10 // por IP y por hora
 )
 
-// ponytail: sesiones en memoria. Un reinicio desloguea al admin, que es
-// aceptable para un solo operador. Mover a Postgres si hay mas de una instancia.
-var (
-	sessMu   sync.Mutex
-	sessions = map[string]time.Time{} // token -> vencimiento
-)
+// Las sesiones viven en Postgres y no en memoria: el proceso se reinicia en
+// cada deploy, y un hosting que duerme el servicio por inactividad lo reinicia
+// muchas mas veces todavia. Con el mapa en memoria eso era un logout cada vez.
+// Se guarda el hash del token, igual que con los OTP: quien lea la base no se
+// lleva sesiones utilizables.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
-func newSession() string {
+func newSession(ctx context.Context) (string, error) {
 	token := randomHex(32)
-	sessMu.Lock()
-	defer sessMu.Unlock()
-	for t, exp := range sessions {
-		if time.Now().After(exp) {
-			delete(sessions, t) // limpieza oportunista, sin goroutine de fondo
-		}
-	}
-	sessions[token] = time.Now().Add(sessionTTL)
-	return token
+	// Limpieza oportunista, sin goroutine de fondo ni cron.
+	db.Exec(ctx, `delete from admin_sessions where expires_at < now()`)
+	_, err := db.Exec(ctx,
+		`insert into admin_sessions (token_hash, expires_at) values ($1, $2)`,
+		hashToken(token), time.Now().Add(sessionTTL))
+	return token, err
 }
 
-func validSession(token string) bool {
-	sessMu.Lock()
-	defer sessMu.Unlock()
-	exp, ok := sessions[token]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(sessions, token)
-		return false
-	}
-	return true
+func validSession(ctx context.Context, token string) bool {
+	var ok bool
+	err := db.QueryRow(ctx,
+		`select true from admin_sessions where token_hash = $1 and expires_at > now()`,
+		hashToken(token)).Scan(&ok)
+	return err == nil && ok
 }
 
-func dropSession(token string) {
-	sessMu.Lock()
-	defer sessMu.Unlock()
-	delete(sessions, token)
+func dropSession(ctx context.Context, token string) {
+	db.Exec(ctx, `delete from admin_sessions where token_hash = $1`, hashToken(token))
 }
 
 func adminConfigured() bool {
@@ -85,7 +78,7 @@ func constantEq(a, b string) bool {
 
 func isAdmin(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
-	return err == nil && validSession(c.Value)
+	return err == nil && validSession(r.Context(), c.Value)
 }
 
 // csrfHeader es la defensa contra CSRF. Un form multipart cross-site es un
@@ -131,6 +124,10 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxA
 		HttpOnly: true, // fuera del alcance de cualquier JS inyectado
 		Secure:   secure,
 		SameSite: sameSite,
+		// CHIPS. Firefox y Chrome estan dejando de aceptar cookies de terceros
+		// sin este atributo; sin el, el login del admin deja de funcionar cuando
+		// terminen de aplicarlo. Solo aplica al caso cross-site.
+		Partitioned: sameSite == http.SameSiteNoneMode,
 	})
 }
 
@@ -159,13 +156,19 @@ func adminLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "email o contraseña incorrectos")
 		return
 	}
-	setSessionCookie(w, r, newSession(), int(sessionTTL.Seconds()))
+	token, err := newSession(r.Context())
+	if err != nil {
+		log.Printf("crear sesion: %v", err)
+		fail(w, http.StatusInternalServerError, "no se pudo iniciar sesión")
+		return
+	}
+	setSessionCookie(w, r, token, int(sessionTTL.Seconds()))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func adminLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		dropSession(c.Value)
+		dropSession(r.Context(), c.Value)
 	}
 	setSessionCookie(w, r, "", -1)
 	w.WriteHeader(http.StatusNoContent)

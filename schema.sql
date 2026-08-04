@@ -53,3 +53,14 @@ alter table signatures add column if not exists phone    text;
 
 -- Una peticion editada cambia de content_hash; updated_at deja ver cuando.
 alter table petitions add column if not exists updated_at timestamptz not null default now();
+
+-- Sesiones del admin. En memoria se perdian en cada reinicio, y en un hosting
+-- que duerme el servicio por inactividad eso es un logout cada vez que entra.
+-- Se guarda el hash del token, no el token: un dump de la base no puede
+-- devolver sesiones vivas.
+create table if not exists admin_sessions (
+  token_hash text primary key,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists admin_sessions_expiry on admin_sessions (expires_at);
