@@ -5,12 +5,36 @@ create table if not exists petitions (
   slug         text unique not null,
   title        text not null,
   body         text,        -- markdown; null cuando la peticion es un PDF
-  pdf          bytea,       -- ponytail: bytea alcanza para docs < 5MB, mover a S3 si crecen
+  pdf          bytea,       -- solo peticiones anteriores a S3; los nuevos van al store
+  pdf_key      text,        -- clave del objeto en S3
   pdf_name     text,
   content_hash text not null,
-  created_at   timestamptz not null default now(),
-  check ((body is null) <> (pdf is null))
+  created_at   timestamptz not null default now()
 );
+
+-- Migracion a S3. La columna es nullable y las peticiones viejas siguen con el
+-- PDF en pdf: no se migran los bytes, se los lee de donde esten.
+alter table petitions add column if not exists pdf_key text;
+
+-- El check original era anonimo y solo conocia body y pdf, asi que con pdf_key
+-- rechazaria toda peticion nueva. Se reemplaza una sola vez, por nombre, para
+-- que este archivo se pueda seguir corriendo en cada arranque.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'petitions'::regclass and conname = 'petitions_content_one_of'
+  ) then
+    execute coalesce(
+      (select string_agg(format('alter table petitions drop constraint %I;', conname), ' ')
+         from pg_constraint where conrelid = 'petitions'::regclass and contype = 'c'),
+      '');
+    -- Exactamente una fuente de contenido: texto, PDF en la base, o PDF en S3.
+    alter table petitions add constraint petitions_content_one_of check (
+      (body is not null)::int + (pdf is not null)::int + (pdf_key is not null)::int = 1
+    );
+  end if;
+end $$;
 
 create table if not exists otps (
   id           bigserial primary key,

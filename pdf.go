@@ -240,14 +240,15 @@ func allSigners(ctx context.Context, petitionID string) ([]signer, error) {
 
 func downloadPetition(w http.ResponseWriter, r *http.Request) {
 	var id, body string
-	var bodyPtr *string
+	var bodyPtr, pdfKey *string
 	var original []byte
 	var p petition
 	err := db.QueryRow(r.Context(),
-		`select p.id, p.slug, p.title, p.body, p.pdf, p.pdf_name, p.content_hash, p.created_at,
+		`select p.id, p.slug, p.title, p.body, p.pdf, p.pdf_key, p.pdf_name, p.content_hash, p.created_at,
 		        (select count(*) from signatures where petition_id = p.id)
 		   from petitions p where p.slug = $1`, r.PathValue("slug")).
-		Scan(&id, &p.Slug, &p.Title, &bodyPtr, &original, &p.PDFName, &p.ContentHash, &p.CreatedAt, &p.Signatures)
+		Scan(&id, &p.Slug, &p.Title, &bodyPtr, &original, &pdfKey, &p.PDFName, &p.ContentHash,
+			&p.CreatedAt, &p.Signatures)
 	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, http.StatusNotFound, "peticion inexistente")
 		return
@@ -259,6 +260,18 @@ func downloadPetition(w http.ResponseWriter, r *http.Request) {
 	}
 	if bodyPtr != nil {
 		body = *bodyPtr
+	}
+
+	// El original puede estar en la base (peticiones viejas) o en el store.
+	// Solo se busca si la peticion es un PDF: las de texto no tienen nada que
+	// traer y no hay por que pegarle a S3 al pedo.
+	if bodyPtr == nil {
+		original, err = readPDF(r.Context(), original, pdfKey)
+		if err != nil {
+			log.Printf("download del store: %v", err)
+			fail(w, http.StatusBadGateway, "no se pudo leer el PDF de la peticion")
+			return
+		}
 	}
 
 	signers, err := allSigners(r.Context(), id)

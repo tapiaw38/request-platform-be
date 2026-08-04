@@ -108,6 +108,76 @@ Vale para las tres salidas: `/signers`, el detalle de la petición y el PDF de
 `/download`, que arma la grilla con esos datos sólo si la request trae la cookie
 del admin. El filtro es del servidor, no del front.
 
+## Dónde viven los PDF
+
+Los PDF nuevos van a S3. Los que ya estaban en el servidor siguen en la columna
+`bytea` de Postgres y **no se migran**: se leen de donde estén.
+
+```sh
+AWS_REGION=us-east-1
+AWS_BUCKET=mi-bucket
+```
+
+Son las mismas variables que usa `auth-api-be` (`AWS_REGION`, `AWS_BUCKET`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), para no tener dos convenciones en
+el mismo stack. Las credenciales son opcionales: sin ellas se usa la cadena por
+defecto del SDK, que es lo que hay que querer cuando el proceso corre con un rol
+de instancia. `AWS_PREFIX` (default `petitions`) y `AWS_ENDPOINT_URL` (sólo para
+MinIO, R2 o tests) completan la lista.
+
+**Sin `AWS_BUCKET` y `AWS_REGION` no pasa nada malo:** los PDF nuevos se guardan
+en `bytea`, exactamente como antes. La falta de credenciales no puede dejar a la
+aplicación sin poder crear peticiones, y si el cliente de S3 no se puede
+construir, el proceso arranca igual y lo dice por log. Lo que sí falla —con 502 y
+un log explícito— es leer una petición que apunta al store desde un proceso sin
+S3: el archivo existe y el problema es de configuración, así que decirlo claro
+importa más que devolver «no tiene PDF».
+
+### Cómo se decide
+
+`petitions` tiene tres fuentes de contenido posibles y un check que exige
+exactamente una:
+
+| | |
+|---|---|
+| `body` | petición de texto |
+| `pdf` | PDF en la base (anterior a S3) |
+| `pdf_key` | clave del objeto en S3 |
+
+Todo el que necesita los bytes pasa por `readPDF`, que mira primero la columna y
+después el store. Es el único lugar que conoce la diferencia, y por eso el resto
+del código no se entera de la migración. Los endpoints no cambian: `/doc` y
+`/download` responden igual vengan de donde vengan los bytes.
+
+El bucket queda **privado**, sin `ACL: public-read`: los bytes se sirven desde la
+API, que es la que ya sabe quién puede ver qué (ver «Qué de eso es público»). Si
+en algún momento el tráfico lo justifica, el paso siguiente son URLs prefirmadas,
+no abrir el bucket.
+
+La clave es `{prefijo}/{slug}/{aleatorio}.pdf`. El slug está para poder mirar el
+bucket y entender qué es cada cosa; el sufijo aleatorio, para que reemplazar el
+PDF de una petición nunca reescriba la clave anterior: si algo se corta a mitad
+de camino, el archivo viejo sigue entero.
+
+### Qué pasa al editar y al borrar
+
+El objeto nuevo se sube **antes** del `UPDATE`, y el viejo se borra **después**,
+recién con la fila ya apuntando al nuevo. Al revés, un fallo a mitad dejaría la
+petición apuntando a la nada. Si el `UPDATE` no encuentra la fila, se borra el
+objeto recién subido.
+
+Borrar una petición borra también su objeto. El `on delete cascade` de Postgres
+limpia firmas y OTP pero no sabe nada del bucket, así que el `delete` usa
+`returning pdf_key`.
+
+Los borrados en el bucket son **best-effort y en segundo plano**: un objeto
+huérfano cuesta centavos, pero abortar el borrado de una petición porque S3 tuvo
+un mal momento deja al admin sin poder trabajar. Los fallos quedan en el log.
+
+Editar una petición vieja subiendo un PDF nuevo la mueve a S3 y deja `pdf` en
+null. Es la única forma en que algo migra, y sólo porque el documento cambió de
+todas formas.
+
 ## Editar y eliminar
 
 | | |
@@ -170,7 +240,12 @@ de una versión previa a una edición salen marcadas.
 
 ## Deuda deliberada
 
-- PDF en `bytea`. Mover a S3/R2 si los documentos pasan de unos MB.
+- El límite de 5MB por PDF sigue en pie aunque los nuevos vayan a S3, para que
+  una petición no se comporte distinto según dónde terminaron sus bytes. Se
+  puede subir, pero entonces conviene hacerlo sólo para el camino de S3.
+- Las peticiones viejas se quedan en `bytea` para siempre salvo que alguien les
+  reemplace el PDF. No hay backfill: si molesta, es un script aparte, no algo
+  que deba correr en cada arranque.
 - Rate limit en memoria, por proceso. Mover a Postgres si corre en más de una instancia.
 - Sin firma digital de Ley 25.506: esto es firma electrónica con evidencia. Para
   el nivel jurídico máximo hay que integrar un certificador licenciado, no
