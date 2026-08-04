@@ -133,6 +133,14 @@ func cors(next http.Handler) http.Handler {
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Origin", allow)
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+csrfHeader)
+		// Sin esto el preflight de PUT y DELETE falla y el navegador reporta un
+		// "NetworkError" generico. GET y POST no lo necesitan porque estan en la
+		// lista segura de CORS: por eso login, listado y firma andaban mientras
+		// editar y eliminar no.
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		// El navegador cachea el preflight y deja de pagar un viaje extra por
+		// cada borrado.
+		w.Header().Set("Access-Control-Max-Age", "86400")
 		// La cookie de sesion del admin no viaja sin esto. Va de la mano con un
 		// origen unico y explicito: con "*" el navegador lo rechaza.
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
