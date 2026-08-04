@@ -159,7 +159,8 @@ Cambiar de proveedor SMTP no toca código, son las mismas cuatro variables
 ## Qué evidencia queda por firma
 
 Nombre, **DNI**, **domicilio**, **localidad**, **celular**, email verificado por
-OTP, comentario, firma dibujada (opcional), IP, user-agent, timestamp y el
+OTP, **firma dibujada** (obligatoria), comentario opcional, IP, user-agent,
+timestamp y el
 **SHA-256 del documento tal como estaba al firmar**. Si el contenido cambia
 después, cada firma sigue apuntando a la versión que esa persona leyó, y firmar
 con un hash desactualizado devuelve `409`.
@@ -256,8 +257,8 @@ que no arrancar, y el log dice cómo encontrarlo.
 
 `GET /api/petitions/{slug}/download` devuelve un PDF con las firmas en grilla de
 2×5 por hoja: trazo, línea, nombre completo, datos y fecha. El trazo se escala
-preservando proporción, y quien firmó sin dibujar aparece con una leyenda en vez
-del trazo.
+preservando proporción. La leyenda «(firma electrónica sin trazo)» sólo aparece
+en firmas anteriores a que el trazo fuera obligatorio.
 
 Si la request trae la cookie del admin, cada celda suma DNI, domicilio y
 celular. Sin ella sale la misma grilla con nombre, localidad y fecha: es el

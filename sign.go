@@ -338,8 +338,16 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 	case len(in.Comment) > maxComment:
 		fail(w, http.StatusBadRequest, "comentario demasiado largo")
 		return
-	case in.Drawing != "" && !strings.HasPrefix(in.Drawing, "data:image/png;base64,"):
-		fail(w, http.StatusBadRequest, "firma dibujada invalida")
+	case in.Drawing == "":
+		fail(w, http.StatusBadRequest, "dibujá tu firma antes de continuar")
+		return
+	// decodeDrawing no solo mira el prefijo: decodifica el PNG y comprueba que
+	// tenga dimensiones. Un data URL bien formado con basura adentro romperia
+	// el armado del PDF mucho despues, cuando ya no se sabe de donde salio.
+	// ponytail: no se detecta un lienzo en blanco. Habria que analizar los
+	// pixeles y solo frena a quien arma el pedido a mano, que ya paso el OTP.
+	case decodeDrawing(&in.Drawing) == nil:
+		fail(w, http.StatusBadRequest, "la firma dibujada no es una imagen válida")
 		return
 	}
 
@@ -391,13 +399,11 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comment, drawing *string
+	var comment *string
 	if c := strings.TrimSpace(in.Comment); c != "" {
 		comment = &c
 	}
-	if in.Drawing != "" {
-		drawing = &in.Drawing
-	}
+	drawing := &in.Drawing // obligatorio, ya validado arriba
 
 	tag, err := db.Exec(r.Context(),
 		`insert into signatures
