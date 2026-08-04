@@ -207,6 +207,13 @@ sirve a cualquiera que tenga el link.
 |---|---|
 | `PUT /api/petitions/{slug}` | reemplaza título y contenido |
 | `DELETE /api/petitions/{slug}` | borra la petición **y todas sus firmas** |
+| `DELETE /api/petitions/{slug}/signers/{id}` | borra una firma puntual |
+
+El borrado de una firma va acotado por `petition_id` además del `id`. Sin eso,
+con adivinar un número se podría borrar una firma de otra petición, que es justo
+lo que un id secuencial hace fácil. Queda registro en el log de cuál se borró,
+de qué petición y desde qué IP: una firma que desaparece sin rastro es peor que
+una firma de más.
 
 Editar **no cambia el slug** aunque cambie el título: el link ya está circulando
 y romperlo perjudica a quien todavía no firmó.

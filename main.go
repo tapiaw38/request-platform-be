@@ -77,6 +77,7 @@ func main() {
 	mux.HandleFunc("GET /api/petitions", listPetitions)
 	mux.HandleFunc("GET /api/petitions/{slug}", getPetition)
 	mux.HandleFunc("GET /api/petitions/{slug}/signers", listSigners)
+	mux.HandleFunc("DELETE /api/petitions/{slug}/signers/{id}", requireAdmin(deleteSigner))
 	mux.HandleFunc("GET /api/petitions/{slug}/doc", getPetitionDoc)
 	// La descarga es solo del admin: lleva DNI, domicilio y celular de cada
 	// firmante, o sea el padron completo con datos personales.
@@ -451,6 +452,45 @@ func getPetition(w http.ResponseWriter, r *http.Request) {
 		signers = redactSigners(signers)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"petition": p, "signers": signers})
+}
+
+// deleteSigner borra una firma puntual. El delete va acotado por petition_id
+// ademas del id: sin eso, con adivinar un numero se podria borrar una firma de
+// otra peticion, que es justo lo que un id secuencial hace facil.
+func deleteSigner(w http.ResponseWriter, r *http.Request) {
+	petitionID, err := petitionIDBySlug(r, r.PathValue("slug"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
+	if err != nil {
+		log.Printf("delete signer lookup: %v", err)
+		fail(w, http.StatusInternalServerError, "error interno")
+		return
+	}
+
+	signerID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || signerID <= 0 {
+		fail(w, http.StatusBadRequest, "firma invalida")
+		return
+	}
+
+	tag, err := db.Exec(r.Context(),
+		`delete from signatures where petition_id = $1 and id = $2`, petitionID, signerID)
+	if err != nil {
+		log.Printf("delete signer: %v", err)
+		fail(w, http.StatusInternalServerError, "no se pudo eliminar la firma")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		fail(w, http.StatusNotFound, "firma inexistente")
+		return
+	}
+	// Queda registro de quien la borro y cuando: una firma que desaparece sin
+	// rastro es peor que una firma de mas.
+	log.Printf("admin elimino la firma %d de la peticion %s, ip %s",
+		signerID, r.PathValue("slug"), clientIP(r))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func getPetitionDoc(w http.ResponseWriter, r *http.Request) {
