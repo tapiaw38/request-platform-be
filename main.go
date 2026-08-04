@@ -97,12 +97,41 @@ func cmp(v, def string) string {
 	return v
 }
 
-// cors abre solo el origen del front de desarrollo. En produccion se sirve
-// el build de Vue desde el mismo dominio y esto queda sin efecto.
+// allowedOrigins lee WEB_ORIGIN, que acepta varios separados por coma. Poder
+// habilitar dos a la vez es lo que permite mudar el front a un dominio propio
+// sin dejarlo roto entre que se cambia la variable y propaga el DNS.
+//
+// La barra final se recorta: el header Origin de un navegador nunca la lleva,
+// asi que "https://x.com/" no coincide con nada y el fallo no dice por que.
+func allowedOrigins() []string {
+	raw := strings.SplitSeq(cmp(os.Getenv("WEB_ORIGIN"), "http://localhost:5173"), ",")
+	var out []string
+	for o := range raw {
+		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// cors responde con el origen del pedido si esta en la lista. Con credenciales
+// el navegador exige un origen unico y explicito: no acepta "*" ni una lista.
 func cors(next http.Handler) http.Handler {
-	origin := cmp(os.Getenv("WEB_ORIGIN"), "http://localhost:5173")
+	origins := allowedOrigins()
+	log.Printf("cors: origenes permitidos %v", origins)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
+		got := r.Header.Get("Origin")
+		allow := origins[0] // sin Origin (curl, navegacion directa) no hay nada que validar
+		for _, o := range origins {
+			if o == got {
+				allow = got
+				break
+			}
+		}
+		// Sin Vary, un cache intermedio puede servirle a un origen la respuesta
+		// que se armo para otro.
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Origin", allow)
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+csrfHeader)
 		// La cookie de sesion del admin no viaja sin esto. Va de la mano con un
 		// origen unico y explicito: con "*" el navegador lo rechaza.

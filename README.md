@@ -18,6 +18,12 @@ desarrollo.
 Variables opcionales: `DATABASE_URL`, `PORT`, `WEB_ORIGIN`, `TRUST_PROXY=1`
 (sólo si hay un reverse proxy adelante).
 
+`WEB_ORIGIN` acepta **varios orígenes separados por coma**, para poder mudar el
+front a un dominio propio sin dejarlo roto mientras propaga el DNS. Va **sin
+barra final**: el header `Origin` de un navegador nunca la lleva, así que
+`https://x.com/` no coincide con nada y el error no dice por qué. El servidor la
+recorta igual, y loguea al arrancar qué orígenes quedaron habilitados.
+
 `schema.sql` va embebido en el binario (`go:embed`) y se aplica en cada
 arranque. Es idempotente, así que hace de migración sin herramienta aparte.
 
