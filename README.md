@@ -204,6 +204,20 @@ confirmación la pide el front; la API no pregunta dos veces.
 go test ./...
 ```
 
+## Contra el abuso automatizado
+
+Tres capas, ninguna con captcha:
+
+- **Honeypot.** El formulario trae un campo que el front dibuja fuera de la
+  pantalla, fuera del orden de tabulación y oculto a los lectores de pantalla.
+  Ninguna persona lo completa; un bot que llena todo el formulario cae solo.
+  Si llega con contenido, el pedido de OTP responde `204` igual que el camino
+  feliz **pero no genera código ni manda mail**: devolver un error le enseñaría
+  al que automatiza cuál es el campo a evitar.
+- **Rate limit por IP**: 20 pedidos de OTP por hora.
+- **Cooldown por email**: un minuto entre códigos para la misma casilla, así la
+  plataforma no sirve para bombardear a un tercero.
+
 ## Una firma por persona
 
 `unique (petition_id, email)` y `unique (petition_id, dni)`. Sin la segunda, la

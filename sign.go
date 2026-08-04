@@ -62,9 +62,19 @@ func petitionIDBySlug(r *http.Request, slug string) (string, error) {
 func requestOTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Email string `json:"email"`
+		// Honeypot: el front lo dibuja invisible y ninguna persona lo completa.
+		// Un bot que llena todos los campos del formulario cae solo.
+		Website string `json:"website"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
 		fail(w, http.StatusBadRequest, "json invalido")
+		return
+	}
+	if in.Website != "" {
+		// Misma respuesta que el camino feliz: si devolvieramos un error, el que
+		// automatiza se daria cuenta del campo y lo dejaria vacio.
+		log.Printf("honeypot: pedido de OTP descartado, ip %s", clientIP(r))
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	email := normalizeEmail(in.Email)
@@ -276,9 +286,17 @@ func signPetition(w http.ResponseWriter, r *http.Request) {
 		Comment  string `json:"comment"`
 		Drawing  string `json:"drawing"`
 		Hash     string `json:"content_hash"`
+		Website  string `json:"website"` // honeypot, ver requestOTP
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxDrawing+8192)).Decode(&in); err != nil {
 		fail(w, http.StatusBadRequest, "json invalido")
+		return
+	}
+	if in.Website != "" {
+		// Acá sí conviene un error: sin OTP válido no iba a firmar igual, y el
+		// mensaje genérico no delata cuál campo lo dejó afuera.
+		log.Printf("honeypot: intento de firma descartado, ip %s", clientIP(r))
+		fail(w, http.StatusBadRequest, "no se pudo registrar la firma")
 		return
 	}
 	email := normalizeEmail(in.Email)
