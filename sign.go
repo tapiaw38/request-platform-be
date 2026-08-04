@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -113,20 +115,90 @@ func requestOTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sendOTP usa SMTP si esta configurado; en desarrollo imprime el codigo.
+// mailFrom devuelve la direccion y el nombre visible del remitente. El nombre
+// es lo que decide si el destinatario confia en el codigo.
+func mailFrom() (addr, name string) {
+	// Con Gmail el From tiene que coincidir con la cuenta autenticada o lo
+	// reescribe, por eso SMTP_USER es el ultimo recurso.
+	addr = cmp(os.Getenv("MAIL_FROM"), cmp(os.Getenv("SMTP_FROM"), os.Getenv("SMTP_USER")))
+	name = cmp(os.Getenv("MAIL_FROM_NAME"), cmp(os.Getenv("SMTP_FROM_NAME"), "Peticiones"))
+	return addr, name
+}
+
+// logMailConfig deja en el arranque por donde va a salir el mail. Sin esto,
+// "no llega el codigo" obliga a adivinar entre falta de config, credenciales
+// mal o puertos bloqueados.
+func logMailConfig() {
+	from, name := mailFrom()
+	switch {
+	case os.Getenv("RESEND_API_KEY") != "":
+		log.Printf("mail: Resend (HTTPS), from %s <%s>", name, from)
+	case os.Getenv("SMTP_HOST") != "":
+		log.Printf("mail: SMTP %s:%s, from %s <%s>",
+			os.Getenv("SMTP_HOST"), cmp(os.Getenv("SMTP_PORT"), "587"), name, from)
+	default:
+		log.Print("mail: sin configurar, los códigos OTP salen por consola")
+	}
+}
+
+func otpSubject(code string) string { return code + " es tu código para firmar" }
+
+func otpBody(code string) string {
+	return "Tu código para firmar es " + code +
+		"\n\nVence en 10 minutos. Si no lo pediste, ignorá este mensaje.\n"
+}
+
+// sendOTP elige por donde sale el mail. La API HTTP va primero porque muchos
+// hostings (Render en su plan gratuito, entre otros) bloquean los puertos SMTP
+// de salida: ahi el unico camino que queda abierto es HTTPS.
 func sendOTP(email, code string) {
-	host := os.Getenv("SMTP_HOST")
-	if host == "" {
-		log.Printf("[dev] sin SMTP_HOST, OTP para %s: %s", email, code)
+	switch {
+	case os.Getenv("RESEND_API_KEY") != "":
+		go sendViaResend(email, code)
+	case os.Getenv("SMTP_HOST") != "":
+		go sendViaSMTP(email, code)
+	default:
+		log.Printf("[dev] sin RESEND_API_KEY ni SMTP_HOST, OTP para %s: %s", email, code)
+	}
+}
+
+// sendViaResend usa la API HTTP, que viaja por 443 y no toca ningun puerto SMTP.
+func sendViaResend(email, code string) {
+	from, name := mailFrom()
+	payload, _ := json.Marshal(map[string]any{
+		"from":    fmt.Sprintf("%s <%s>", name, from),
+		"to":      []string{email},
+		"subject": otpSubject(code),
+		"text":    otpBody(code),
+	})
+	req, err := http.NewRequest(http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("envio de OTP a %s fallido al armar el pedido: %v", email, err)
 		return
 	}
-	user := os.Getenv("SMTP_USER")
-	// Gmail reescribe el From si no coincide con la cuenta autenticada,
-	// asi que por defecto usamos esa misma direccion.
-	from := cmp(os.Getenv("SMTP_FROM"), user)
-	// El nombre visible es lo que decide si el destinatario confia en el codigo.
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("RESEND_API_KEY"))
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		log.Printf("envio de OTP a %s fallido: %v", email, err)
+		return
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 300 {
+		// El cuerpo dice por que: dominio sin verificar, clave invalida, etc.
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		log.Printf("envio de OTP a %s rechazado por Resend (%d): %s", email, res.StatusCode, body)
+		return
+	}
+	log.Printf("OTP enviado a %s via Resend", email)
+}
+
+func sendViaSMTP(email, code string) {
+	host := os.Getenv("SMTP_HOST")
+	from, rawName := mailFrom()
 	// QEncoding para que los acentos no lleguen rotos al header.
-	name := mime.QEncoding.Encode("utf-8", cmp(os.Getenv("SMTP_FROM_NAME"), "Peticiones"))
+	name := mime.QEncoding.Encode("utf-8", rawName)
 	// Date y Message-ID son obligatorios en RFC 5322. Sin ellos el mensaje
 	// puntua como spam aunque el servidor de salida lo acepte.
 	domain := from
@@ -139,23 +211,22 @@ func sendOTP(email, code string) {
 			"Date: %s\r\nMessage-ID: <%s@%s>\r\n"+
 			"Auto-Submitted: auto-generated\r\n"+
 			"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\n"+
-			"Tu código para firmar es %s\r\n\r\n"+
-			"Vence en 10 minutos. Si no lo pediste, ignorá este mensaje.\r\n",
+			"%s",
 		name, from, email,
-		mime.QEncoding.Encode("utf-8", code+" es tu código para firmar"),
+		mime.QEncoding.Encode("utf-8", otpSubject(code)),
 		time.Now().Format(time.RFC1123Z), randomHex(16), domain,
-		code)
-	auth := smtp.PlainAuth("", user, os.Getenv("SMTP_PASS"), host)
+		otpBody(code))
+
+	auth := smtp.PlainAuth("", os.Getenv("SMTP_USER"), os.Getenv("SMTP_PASS"), host)
 	addr := host + ":" + cmp(os.Getenv("SMTP_PORT"), "587")
-	go func() {
-		if err := smtp.SendMail(addr, auth, from, []string{email}, msg); err != nil {
-			log.Printf("envio de OTP a %s fallido: %v", email, err)
-			return
-		}
-		// Log explicito: el silencio no puede significar a la vez "salio bien"
-		// y "ni siquiera se intento".
-		log.Printf("OTP enviado a %s via %s", email, addr)
-	}()
+	if err := smtp.SendMail(addr, auth, from, []string{email}, msg); err != nil {
+		log.Printf("envio de OTP a %s fallido: %v", email, err)
+		log.Print("si es un timeout, el hosting bloquea los puertos SMTP de salida: usá RESEND_API_KEY")
+		return
+	}
+	// Log explicito: el silencio no puede significar a la vez "salio bien"
+	// y "ni siquiera se intento".
+	log.Printf("OTP enviado a %s via %s", email, addr)
 }
 
 func signPetition(w http.ResponseWriter, r *http.Request) {

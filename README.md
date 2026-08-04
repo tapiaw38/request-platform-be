@@ -76,15 +76,36 @@ git push heroku main
 ## Mail (OTP)
 
 ```sh
-cp .env.example .env     # completar SMTP_USER y SMTP_PASS
+cp .env.example .env
 set -a && . ./.env && set +a && go run .
 ```
 
-Con Gmail, `SMTP_PASS` es un **App Password** de 16 caracteres
+Hay dos vías y la API elige sola: si está `RESEND_API_KEY` usa la API HTTP; si
+no, SMTP; si no hay ninguna, imprime el código por consola. El arranque loguea
+cuál quedó activa (`mail: ...`), así que «no llega el código» se diagnostica
+mirando el log en vez de adivinando.
+
+### Por API HTTP — recomendada en producción
+
+```sh
+RESEND_API_KEY=re_xxxxxxxx
+MAIL_FROM=avisos@tudominio.com    # onboarding@resend.dev sirve para probar ya
+MAIL_FROM_NAME=Peticiones
+```
+
+**Muchos hostings bloquean los puertos SMTP de salida.** Render los cierra todos
+—25, 465 y 587— en sus servicios gratuitos, y ahí el envío muere en timeout sin
+más señal que la del log. La API HTTP sale por 443 y no la afecta.
+
+### Por SMTP
+
+Anda en local y en hostings que no bloqueen el puerto. Con Gmail, `SMTP_PASS` es
+un **App Password** de 16 caracteres
 (<https://myaccount.google.com/apppasswords>, requiere 2FA), nunca la
 contraseña de la cuenta. `.env` está en `.gitignore`.
 
-Cambiar de proveedor no toca código, son las mismas cuatro variables `SMTP_*`.
+Cambiar de proveedor SMTP no toca código, son las mismas cuatro variables
+`SMTP_*`.
 
 ## Qué evidencia queda por firma
 

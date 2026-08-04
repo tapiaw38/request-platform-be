@@ -63,6 +63,7 @@ func main() {
 	if !adminConfigured() {
 		log.Print("aviso: sin ADMIN_EMAIL/ADMIN_PASSWORD nadie puede crear peticiones")
 	}
+	logMailConfig()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/admin/login", adminLogin)
