@@ -95,6 +95,22 @@ más señal que la del log. Las dos APIs HTTP salen por 443 y no las afecta.
 | Resend | **obligatorio** | 3.000/mes | buena |
 | SMTP | no hace falta | — | según el proveedor |
 
+### Un 2xx no es una entrega
+
+Las dos APIs responden `201` en cuanto encolan el pedido, y **descartan el
+mensaje después** si el remitente no está habilitado. El log dice «encolado»
+justamente por eso: es lo único que ese código garantiza.
+
+Si el código no llega y el log no muestra ningún rechazo, la verdad está en el
+panel del proveedor. En Brevo, **Transactional → Logs**, o por API:
+
+```sh
+curl -s 'https://api.brevo.com/v3/smtp/statistics/events?limit=10' -H "api-key: $BREVO_API_KEY"
+```
+
+Un `ERROR` con `sender ... is not valid` significa que `MAIL_FROM` no está
+verificado como remitente ni pertenece a un dominio autenticado.
+
 ### Por Brevo — sin dominio propio
 
 ```sh
@@ -105,6 +121,14 @@ MAIL_FROM_NAME=Peticiones
 
 Es la única vía gratuita que funciona sin dominio: se verifica la casilla
 remitente con un código de 6 dígitos que Brevo manda a esa dirección.
+
+**`MAIL_FROM` tiene que ser esa casilla verificada, exactamente.** Cualquier otra
+dirección se acepta con `201` y se descarta sin aviso.
+
+Con dominio propio se autentica el dominio entero (TXT de verificación, dos
+CNAME de DKIM y un TXT de DMARC) y entonces sirve cualquier dirección de ese
+dominio. Cargar el DNS no alcanza: hay que apretar **Authenticate domain** en
+Brevo, o el dominio queda en `authenticated: false` esperando para siempre.
 
 Sin dominio propio no hay SPF ni DKIM alineados, así que **buena parte de los
 mails va a caer en spam**. Sirve para arrancar; para que lleguen bien hace falta

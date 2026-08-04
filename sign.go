@@ -176,9 +176,10 @@ func sendOTP(email, code string) {
 	}
 }
 
-// postJSON hace el pedido y devuelve el cuerpo si el proveedor lo rechaza.
-// Las dos APIs se comportan igual: 2xx es exito, y el cuerpo del error dice
-// por que (clave invalida, remitente sin verificar, cuota agotada).
+// postJSON hace el pedido y loguea el cuerpo si el proveedor lo rechaza en el
+// momento. Ojo: un 2xx solo confirma que el pedido entro en la cola. Brevo, por
+// ejemplo, devuelve 201 y recien despues descarta el mensaje si el remitente no
+// esta verificado. La entrega real se mira en el panel del proveedor.
 func postJSON(url string, headers map[string]string, payload any, email, proveedor string) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -203,15 +204,21 @@ func postJSON(url string, headers map[string]string, payload any, email, proveed
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		log.Printf("envio de OTP a %s rechazado por %s (%d): %s", email, proveedor, res.StatusCode, raw)
+		log.Printf("OTP a %s rechazado por %s (%d): %s", email, proveedor, res.StatusCode, raw)
 		return
 	}
-	log.Printf("OTP enviado a %s via %s", email, proveedor)
+	// "encolado" y no "enviado": un 2xx acá solo dice que el proveedor acepto
+	// el pedido. El rechazo real (remitente sin verificar, dominio sin
+	// autenticar, cuota) llega despues y por otro canal. Decir "enviado" hace
+	// buscar el problema en el lado equivocado.
+	log.Printf("OTP a %s encolado en %s; la entrega se confirma en el panel del proveedor",
+		email, proveedor)
 }
 
-// sendViaBrevo es la unica via gratuita que no exige dominio propio: alcanza
-// con verificar la casilla remitente con el codigo de 6 digitos que Brevo
-// manda. Va por 443, asi que tampoco la toca el bloqueo de puertos SMTP.
+// sendViaBrevo va por 443, asi que no la toca el bloqueo de puertos SMTP.
+// MAIL_FROM tiene que ser un remitente verificado en Brevo, o de un dominio
+// autenticado ahi. Si no lo es, la API igual responde 201 y descarta el mensaje
+// despues: no hay forma de enterarse desde el codigo.
 func sendViaBrevo(email, code string) {
 	from, name := mailFrom()
 	postJSON("https://api.brevo.com/v3/smtp/email",
@@ -271,7 +278,9 @@ func sendViaSMTP(email, code string) {
 	}
 	// Log explicito: el silencio no puede significar a la vez "salio bien"
 	// y "ni siquiera se intento".
-	log.Printf("OTP enviado a %s via %s", email, addr)
+	// SMTP si entrega de verdad en esta llamada: el servidor acepto el mensaje
+	// en la sesion. Aun asi puede rebotar despues, pero el salto es real.
+	log.Printf("OTP a %s aceptado por %s", email, addr)
 }
 
 func signPetition(w http.ResponseWriter, r *http.Request) {
