@@ -48,6 +48,46 @@ func TestDecodeDrawing(t *testing.T) {
 	}
 }
 
+// Un trazo blanco es el que dejaba quien firmaba en modo oscuro. Sobre la hoja
+// blanca del PDF no se ve, asi que el armado tiene que repintarlo.
+func TestInkifyRepintaTrazoBlanco(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 10, 10))
+	img.SetNRGBA(5, 5, color.NRGBA{R: 255, G: 255, B: 255, A: 255}) // trazo blanco
+	img.SetNRGBA(6, 6, color.NRGBA{R: 255, G: 255, B: 255, A: 128}) // borde suavizado
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	url := "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	got := decodeDrawing(&url)
+	if got == nil {
+		t.Fatal("deberia decodificar")
+	}
+	out, err := png.Decode(bytes.NewReader(got.data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, g, b, a := out.At(5, 5).RGBA()
+	if r>>8 > 40 || g>>8 > 40 || b>>8 > 40 {
+		t.Errorf("el trazo sigue claro: r=%d g=%d b=%d", r>>8, g>>8, b>>8)
+	}
+	if a>>8 != 255 {
+		t.Errorf("el trazo opaco perdio opacidad: a=%d", a>>8)
+	}
+
+	// El borde suavizado tiene que conservar su alfa, o la firma queda dentada.
+	if _, _, _, a := out.At(6, 6).RGBA(); a>>8 < 120 || a>>8 > 136 {
+		t.Errorf("el alfa del borde no se conservo: a=%d, esperaba ~128", a>>8)
+	}
+
+	// Fuera del trazo sigue transparente: no se pinta un rectangulo de fondo.
+	if _, _, _, a := out.At(0, 0).RGBA(); a != 0 {
+		t.Errorf("el fondo dejo de ser transparente: a=%d", a>>8)
+	}
+}
+
 func samplePetition() petition {
 	return petition{
 		Slug:        "senal-peatonal-ruta-40-a1b2c3",

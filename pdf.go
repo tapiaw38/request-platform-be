@@ -7,7 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/png"
+	"image/color"
+	"image/png"
 	"io"
 	"log"
 	"net/http"
@@ -193,6 +194,57 @@ type drawing struct {
 	w, h int
 }
 
+// inkPDF es la tinta de las firmas en el PDF. El trazo llega con el color que
+// tenia el tema de quien firmo: los que firmaron en modo oscuro guardaron
+// blanco, y sobre una hoja blanca eso es una firma que no existe. Se repinta.
+var inkPDF = color.NRGBA{R: 17, G: 24, B: 39, A: 255}
+
+// inkify repinta el trazo conservando el canal alfa, asi que el suavizado de
+// bordes sobrevive y la firma no queda dentada. Se aplica siempre: sobre un
+// trazo que ya era oscuro no cambia nada visible.
+func inkify(raw []byte) ([]byte, error) {
+	src, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	b := src.Bounds()
+	dst := image.NewNRGBA(b)
+
+	// Camino rapido para el formato que devuelve png.Decode con un PNG RGBA,
+	// que es lo que emite el canvas del front. Recorrer Pix directo en vez de
+	// llamar At() por pixel: la llamada por interfaz, 144.000 veces por firma,
+	// era casi todo el costo de armar el padron.
+	if n, ok := src.(*image.NRGBA); ok {
+		for i := 0; i+3 < len(n.Pix); i += 4 {
+			if a := n.Pix[i+3]; a != 0 {
+				dst.Pix[i], dst.Pix[i+1], dst.Pix[i+2], dst.Pix[i+3] = inkPDF.R, inkPDF.G, inkPDF.B, a
+			}
+		}
+	} else {
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				// RGBA() devuelve alfa premultiplicado en 16 bits; >>8 lo baja a 8.
+				_, _, _, a := src.At(x, y).RGBA()
+				if a == 0 {
+					continue // fuera del trazo: queda transparente
+				}
+				c := inkPDF
+				c.A = uint8(a >> 8)
+				dst.SetNRGBA(x, y, c)
+			}
+		}
+	}
+	// BestSpeed y no el default: el PNG se embebe en el PDF y se comprime otra
+	// vez ahi, asi que apretarlo al maximo aca es tiempo tirado. Con el nivel
+	// por defecto, armar un padron de miles de firmas se iba a casi un minuto.
+	var buf bytes.Buffer
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(&buf, dst); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // decodeDrawing acepta solo PNG en data URL, que es lo unico que emite el
 // canvas del front. Cualquier otra cosa se ignora en vez de romper el PDF.
 func decodeDrawing(d *string) *drawing {
@@ -210,6 +262,13 @@ func decodeDrawing(d *string) *drawing {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil || format != "png" || cfg.Width == 0 || cfg.Height == 0 {
 		return nil
+	}
+	// Si el repintado falla, se usa el trazo original: una firma con el color
+	// equivocado sigue siendo mejor que una celda vacia.
+	if inked, err := inkify(raw); err == nil {
+		raw = inked
+	} else {
+		log.Printf("no se pudo repintar una firma, se usa el original: %v", err)
 	}
 	return &drawing{data: raw, w: cfg.Width, h: cfg.Height}
 }

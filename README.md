@@ -285,7 +285,10 @@ que no arrancar, y el log dice cómo encontrarlo.
 ## Descarga con firmas
 
 `GET /api/petitions/{slug}/download` devuelve un PDF con las firmas en grilla de
-2×5 por hoja: trazo, línea, nombre completo, datos y fecha. El trazo se escala
+2×5 por hoja: trazo, línea, nombre completo, datos y fecha. El trazo se **repinta a tinta oscura** antes de embeberlo: llegaba con el color
+del tema de quien firmó, así que quien firmó en modo oscuro guardaba blanco y
+sobre la hoja blanca del PDF su firma no existía. El repintado conserva el canal
+alfa, así que el suavizado de bordes sobrevive. El trazo se escala
 preservando proporción. La leyenda «(firma electrónica sin trazo)» sólo aparece
 en firmas anteriores a que el trazo fuera obligatorio.
 
