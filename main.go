@@ -68,6 +68,10 @@ func main() {
 	initStore(context.Background())
 
 	mux := http.NewServeMux()
+	// Primero: es la puerta que golpea el front para despertar al servicio, y
+	// tambien la que mira un pinger externo. GET tambien atiende HEAD.
+	mux.HandleFunc("GET /api/health", health)
+
 	mux.HandleFunc("POST /api/admin/login", adminLogin)
 	mux.HandleFunc("POST /api/admin/logout", adminLogout)
 	mux.HandleFunc("GET /api/admin/me", adminMe)
