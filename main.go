@@ -65,6 +65,8 @@ func main() {
 	}
 	logMailConfig()
 
+	initStore(context.Background())
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/admin/login", adminLogin)
 	mux.HandleFunc("POST /api/admin/logout", adminLogout)
@@ -257,6 +259,23 @@ func parsePetitionForm(w http.ResponseWriter, r *http.Request) (petitionForm, bo
 	return out, true
 }
 
+// storePDF decide donde van los bytes: al store si hay S3 configurado, o a la
+// columna bytea si no, que es exactamente lo que hacia antes de existir S3.
+// Devuelve el par (bytea, clave) listo para el insert o el update.
+func storePDF(ctx context.Context, slug string, pdf []byte) (raw []byte, key *string, err error) {
+	if pdf == nil {
+		return nil, nil, nil
+	}
+	if !storeEnabled() {
+		return pdf, nil, nil
+	}
+	k, err := putPDF(ctx, slug, pdf)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, &k, nil
+}
+
 func createPetition(w http.ResponseWriter, r *http.Request) {
 	in, ok := parsePetitionForm(w, r)
 	if !ok {
@@ -264,12 +283,21 @@ func createPetition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slug := slugify(in.title)
-	_, err := db.Exec(r.Context(),
-		`insert into petitions (slug, title, body, pdf, pdf_name, content_hash)
-		 values ($1,$2,$3,$4,$5,$6)`,
-		slug, in.title, in.body, in.pdf, in.pdfName, in.hash)
+	raw, key, err := storePDF(r.Context(), slug, in.pdf)
+	if err != nil {
+		log.Printf("subir pdf: %v", err)
+		fail(w, http.StatusBadGateway, "no se pudo guardar el PDF")
+		return
+	}
+
+	_, err = db.Exec(r.Context(),
+		`insert into petitions (slug, title, body, pdf, pdf_key, pdf_name, content_hash)
+		 values ($1,$2,$3,$4,$5,$6,$7)`,
+		slug, in.title, in.body, raw, key, in.pdfName, in.hash)
 	if err != nil {
 		log.Printf("insert petition: %v", err)
+		// El objeto ya subido no le sirve a nadie si la fila no existe.
+		dropPDF(key)
 		fail(w, http.StatusInternalServerError, "no se pudo crear la peticion")
 		return
 	}
@@ -287,23 +315,44 @@ func updatePetition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slug := r.PathValue("slug")
+	raw, key, err := storePDF(r.Context(), slug, in.pdf)
+	if err != nil {
+		log.Printf("subir pdf: %v", err)
+		fail(w, http.StatusBadGateway, "no se pudo guardar el PDF")
+		return
+	}
+
 	// Los campos del tipo que no se manda se ponen en null explicitamente:
 	// pasar de texto a PDF (o al reves) tiene que dejar un solo contenido vivo,
-	// que es justo lo que exige el check de la tabla.
-	tag, err := db.Exec(r.Context(),
-		`update petitions
-		    set title = $2, body = $3, pdf = $4, pdf_name = $5,
-		        content_hash = $6, updated_at = now()
-		  where slug = $1`,
-		slug, in.title, in.body, in.pdf, in.pdfName, in.hash)
+	// que es justo lo que exige el check de la tabla. Devolver la clave vieja
+	// en el mismo update evita leerla antes en otra consulta.
+	var oldKey *string
+	err = db.QueryRow(r.Context(),
+		// El CTE se evalua sobre la instantanea previa al update, asi que trae
+		// la clave vieja aunque la misma sentencia la este pisando. Un subselect
+		// suelto en el returning depende de sutilezas de snapshot; esto no.
+		`with anterior as (select pdf_key from petitions where slug = $1)
+		 update petitions
+		    set title = $2, body = $3, pdf = $4, pdf_key = $5, pdf_name = $6,
+		        content_hash = $7, updated_at = now()
+		  where slug = $1
+	   returning (select pdf_key from anterior)`,
+		slug, in.title, in.body, raw, key, in.pdfName, in.hash).Scan(&oldKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		dropPDF(key) // no habia peticion que editar: el objeto recien subido sobra
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
 	if err != nil {
 		log.Printf("update petition: %v", err)
+		dropPDF(key)
 		fail(w, http.StatusInternalServerError, "no se pudo editar la peticion")
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		fail(w, http.StatusNotFound, "peticion inexistente")
-		return
+	// Recien con la fila ya actualizada se borra el PDF anterior: si se hiciera
+	// antes y el update fallara, la peticion quedaria apuntando a la nada.
+	if oldKey != nil && (key == nil || *oldKey != *key) {
+		dropPDF(oldKey)
 	}
 	// Los OTP pendientes apuntan a la version vieja: si alguien los usa ahora
 	// choca con el 409 del hash. Se queman para que pida uno nuevo y lea el
@@ -317,16 +366,21 @@ func updatePetition(w http.ResponseWriter, r *http.Request) {
 // deletePetition borra la peticion y, por cascade, sus firmas y sus OTP.
 // Es irreversible: la confirmacion la pide el front.
 func deletePetition(w http.ResponseWriter, r *http.Request) {
-	tag, err := db.Exec(r.Context(), `delete from petitions where slug = $1`, r.PathValue("slug"))
+	// El cascade de Postgres limpia firmas y OTP, pero no sabe nada del bucket:
+	// returning trae la clave para poder borrar tambien el objeto.
+	var key *string
+	err := db.QueryRow(r.Context(),
+		`delete from petitions where slug = $1 returning pdf_key`, r.PathValue("slug")).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(w, http.StatusNotFound, "peticion inexistente")
+		return
+	}
 	if err != nil {
 		log.Printf("delete petition: %v", err)
 		fail(w, http.StatusInternalServerError, "no se pudo eliminar la peticion")
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		fail(w, http.StatusNotFound, "peticion inexistente")
-		return
-	}
+	dropPDF(key)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -532,10 +586,11 @@ func deleteSigner(w http.ResponseWriter, r *http.Request) {
 
 func getPetitionDoc(w http.ResponseWriter, r *http.Request) {
 	var pdf []byte
-	var name *string
+	var key, name *string
 	err := db.QueryRow(r.Context(),
-		`select pdf, pdf_name from petitions where slug = $1`, r.PathValue("slug")).Scan(&pdf, &name)
-	if errors.Is(err, pgx.ErrNoRows) || pdf == nil {
+		`select pdf, pdf_key, pdf_name from petitions where slug = $1`,
+		r.PathValue("slug")).Scan(&pdf, &key, &name)
+	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, http.StatusNotFound, "esta peticion no tiene PDF")
 		return
 	}
@@ -544,6 +599,20 @@ func getPetitionDoc(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "error al leer el PDF")
 		return
 	}
+
+	// Los bytes salen de la base o del store segun donde esten. El cliente no
+	// ve la diferencia: mismo endpoint, mismo Content-Type, misma respuesta.
+	pdf, err = readPDF(r.Context(), pdf, key)
+	if errors.Is(err, errBlobNotFound) {
+		fail(w, http.StatusNotFound, "esta peticion no tiene PDF")
+		return
+	}
+	if err != nil {
+		log.Printf("get doc del store: %v", err)
+		fail(w, http.StatusBadGateway, "no se pudo leer el PDF")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", "inline; filename=\""+cmp(deref(name), "peticion.pdf")+"\"")
 	w.Write(pdf)
