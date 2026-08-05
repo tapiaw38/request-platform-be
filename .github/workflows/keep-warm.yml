@@ -1,0 +1,48 @@
+# Mantiene despierto el servicio para que nadie pague el arranque en frio.
+#
+# NO HACE NADA hasta que definas la variable HEALTH_URL del repositorio
+# (Settings -> Secrets and variables -> Actions -> Variables), por ejemplo
+# https://tu-app.onrender.com/api/health. Sin eso el job sale enseguida, asi
+# que mergear esto no consume nada por accidente.
+#
+# Antes de prenderlo, leer "Mantenerlo despierto" en el README: esto gasta
+# horas de instancia del plan gratuito, y el front ya sabe esperar el arranque
+# sin romperse.
+name: keep-warm
+
+on:
+  schedule:
+    # Cada 10 minutos, solo en el horario en que la gente usa el sitio
+    # (08:00-03:00 en Argentina, UTC-3). Render suspende a los ~15 minutos de
+    # inactividad, asi que 10 deja margen. Fuera de ese rango se lo deja dormir:
+    # las horas de instancia son finitas.
+    - cron: '*/10 11-23,0-5 * * *'
+  workflow_dispatch:
+
+# Si una corrida se solapa con la anterior, la vieja sobra.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Despertar el servicio
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "HEALTH_URL sin definir: no hay nada que despertar."
+            exit 0
+          fi
+          # --max-time 90: el arranque en frio puede tardar cerca de un minuto y
+          # el pedido que lo dispara es el que espera. Cortar antes seria dejar
+          # el servicio a medio arrancar y volver a intentar en 10 minutos.
+          codigo=$(curl -sS -o /tmp/salida -w '%{http_code}' --max-time 90 "$HEALTH_URL" || echo 000)
+          echo "HTTP $codigo"
+          cat /tmp/salida || true
+          echo
+          # 200 es lo unico que cuenta como despierto y con base. Un 503 dice que
+          # el proceso subio pero Postgres no contesta, y eso hay que verlo.
+          [ "$codigo" = "200" ]

@@ -304,10 +304,59 @@ documento actual.
 Eliminar es irreversible y arrastra firmas y OTP por `on delete cascade`. La
 confirmación la pide el front; la API no pregunta dos veces.
 
+## El arranque en frío
+
+En el plan gratuito de Render el servicio **se suspende tras ~15 minutos sin
+tráfico**, y el primer pedido después de eso espera a que vuelva a arrancar:
+cerca de un minuto. No es un error que se pueda arreglar desde el código —es
+cómo funciona el plan—, así que lo que hay es una forma barata de golpear la
+puerta y saber cuándo se abrió.
+
+```
+GET /api/health  →  200 {"status":"ok","db":true,"uptime_s":1843}
+                    503 {"status":"degraded","db":false}
+```
+
+Hace un `Ping` a Postgres con 2 s de tope. Devolver 200 sin mirar la base sería
+más rápido y más inútil: el proceso puede estar arriba y la aplicación no servir
+para nada. `uptime_s` es un valor chico cuando el servicio acaba de despertarse,
+así que sirve para saber si el keep-alive está haciendo algo o no.
+
+Responde con `Cache-Control: no-store` —un intermediario que la guarde convierte
+el chequeo en adorno— y, como está registrada con `GET`, también atiende `HEAD`,
+que es lo que mandan casi todos los monitores.
+
+El front hace el resto: pinguea al arrancar, muestra una pantalla de espera que
+explica qué está pasando, reintenta los `GET` y **despierta el servicio antes de
+mandar cualquier pedido que modifique**, para no tener que reintentar algo que
+no es seguro repetir. Está explicado en el README del front.
+
+### Mantenerlo despierto
+
+Se puede evitar la suspensión pinguéandolo desde afuera, pero **no sale gratis**:
+el plan libre da 750 horas de instancia por mes y el servicio consume horas
+mientras está despierto. Tenerlo arriba las 24 h son ~730 h/mes: entra, pero sin
+margen para un segundo servicio ni para reinicios.
+
+Por eso `.github/workflows/keep-warm.yml` pinguea cada 10 minutos **sólo entre
+las 08:00 y las 03:00 de Argentina** (~480 h/mes) y deja que se duerma de
+madrugada. Viene desactivado de hecho: no hace nada hasta que definas la
+variable `HEALTH_URL` del repositorio, así que mergearlo no consume nada por
+accidente.
+
+Los cron de GitHub Actions se atrasan bastante bajo carga y se apagan solos en
+repos sin actividad por 60 días. Si el keep-alive te importa de verdad, un
+monitor externo (UptimeRobot, cron-job.org, Better Stack) es más confiable y
+apunta a la misma URL.
+
+Y si lo que te sobra es paciencia y lo que te falta son horas, la opción válida
+es no pinguear nada: el front ya sabe esperar el arranque sin romperse.
+
 ## Endpoints
 
 | Método | Ruta | |
 |---|---|---|
+| GET | `/api/health` | `{status, db, uptime_s}` · 200 si la base responde, 503 si no |
 | POST | `/api/admin/login` | `{email, password}` → cookie de sesión |
 | POST | `/api/admin/logout` | cierra la sesión |
 | GET | `/api/admin/me` | `{admin, configured}` |
